@@ -32,16 +32,17 @@ app = Flask(__name__, static_folder=None)
 if os.environ.get("TRUST_PROXY_HEADERS", "false").lower() == "true":
     app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
-APP_URL = os.environ.get("APP_URL", "http://127.0.0.1:5000").rstrip("/")
-QR_BASE_URL = os.environ.get("QR_BASE_URL", APP_URL).rstrip("/")
+EXTERNAL_URL = os.environ.get("EXTERNAL_URL", os.environ.get("APP_URL", "http://127.0.0.1:5000")).rstrip("/")
+APP_URL = EXTERNAL_URL
+QR_BASE_URL = os.environ.get("QR_BASE_URL", EXTERNAL_URL).rstrip("/")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
 OIDC_ISSUER = os.environ.get("CRM_OIDC_ISSUER", "https://lk.silaeder.ru").rstrip("/")
 OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and all(
     os.environ.get(key) for key in ("SECRET_KEY", "CRM_OIDC_CLIENT_ID", "CRM_OIDC_CLIENT_SECRET")
 )
-OIDC_REDIRECT_URI = os.environ.get("CRM_OIDC_REDIRECT_URI", f"{APP_URL}/auth/silaeder/callback")
-OIDC_LOGOUT_REDIRECT_URI = os.environ.get("CRM_OIDC_POST_LOGOUT_REDIRECT_URI", f"{APP_URL}/auth/silaeder/logout/callback")
+OIDC_REDIRECT_URI = os.environ.get("CRM_OIDC_REDIRECT_URI", f"{EXTERNAL_URL}/auth/silaeder/callback")
+OIDC_LOGOUT_REDIRECT_URI = os.environ.get("CRM_OIDC_POST_LOGOUT_REDIRECT_URI", f"{EXTERNAL_URL}/auth/silaeder/logout/callback")
 app.config.update(
     MAX_CONTENT_LENGTH=32 * 1024,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
@@ -411,8 +412,10 @@ def silaeder_login():
     if not OIDC_ENABLED:
         session["auth_message"] = "Школьный вход ещё не настроен администратором."
         return redirect("/#home")
-    if request.host_url.rstrip("/") != APP_URL:
-        return redirect(f"{APP_URL}/auth/silaeder/login")
+    external_host = urlsplit(EXTERNAL_URL).hostname
+    request_host = urlsplit(f"//{request.host}").hostname
+    if request_host != external_host:
+        return redirect(f"{EXTERNAL_URL}/auth/silaeder/login")
     return oauth.silaeder.authorize_redirect(OIDC_REDIRECT_URI)
 
 
