@@ -2,4 +2,5 @@ Flask==3.1.2
 waitress==3.0.2
 Authlib==1.7.2
 python-dotenv==1.1.1
-requests>=2.32,<3
+requests==2.34.2
+qrcode==8.2

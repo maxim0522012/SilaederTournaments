@@ -1,52 +1,23 @@
-const DB_KEY = 'school-table-tennis-v2';
-const SESSION_KEY = 'school-table-tennis-session';
 const ELO_START = 1000;
 const ELO_K = 24;
-
-const now = Date.now();
-const day = 86_400_000;
-const seed = {
-  users: [
-    {id:'admin',firstName:'Администратор',lastName:'Школы',className:'',login:'admin',password:'admin',role:'admin',status:'active',isPlayer:false,createdAt:now-20*day},
-    {id:'u1',firstName:'Максим',lastName:'Орлов',className:'10Б',login:'maxim',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-18*day},
-    {id:'u2',firstName:'Анна',lastName:'Белова',className:'9А',login:'anna',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-18*day},
-    {id:'u3',firstName:'Илья',lastName:'Соколов',className:'11А',login:'ilya',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-17*day},
-    {id:'u4',firstName:'Мария',lastName:'Волкова',className:'8В',login:'maria',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-16*day},
-    {id:'u5',firstName:'Артём',lastName:'Кузнецов',className:'10А',login:'artem',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-15*day},
-    {id:'u6',firstName:'София',lastName:'Лебедева',className:'9Б',login:'sofia',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-14*day},
-    {id:'u7',firstName:'Даниил',lastName:'Морозов',className:'8А',login:'daniil',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-13*day},
-    {id:'u8',firstName:'Ева',lastName:'Новикова',className:'7Б',login:'eva',password:'123456',role:'user',status:'active',isPlayer:true,createdAt:now-12*day}
-  ],
-  matches: [
-    {id:'m1',playerOne:'u1',playerTwo:'u2',scoreOne:11,scoreTwo:8,witness:'u4',createdAt:now-10*day,active:true},
-    {id:'m2',playerOne:'u3',playerTwo:'u5',scoreOne:13,scoreTwo:11,witness:'u2',createdAt:now-9*day,active:true},
-    {id:'m3',playerOne:'u4',playerTwo:'u6',scoreOne:7,scoreTwo:11,witness:'u1',createdAt:now-8*day,active:true},
-    {id:'m4',playerOne:'u1',playerTwo:'u3',scoreOne:11,scoreTwo:9,witness:'u7',createdAt:now-7*day,active:true},
-    {id:'m5',playerOne:'u2',playerTwo:'u4',scoreOne:11,scoreTwo:5,witness:'u5',createdAt:now-6*day,active:true},
-    {id:'m6',playerOne:'u5',playerTwo:'u7',scoreOne:11,scoreTwo:6,witness:'u3',createdAt:now-5*day,active:true},
-    {id:'m7',playerOne:'u6',playerTwo:'u8',scoreOne:11,scoreTwo:4,witness:'u2',createdAt:now-4*day,active:true},
-    {id:'m8',playerOne:'u1',playerTwo:'u4',scoreOne:12,scoreTwo:10,witness:'u6',createdAt:now-3*day,active:true},
-    {id:'m9',playerOne:'u2',playerTwo:'u3',scoreOne:9,scoreTwo:11,witness:'u8',createdAt:now-2*day,active:true},
-    {id:'m10',playerOne:'u5',playerTwo:'u6',scoreOne:8,scoreTwo:11,witness:'u4',createdAt:now-day,active:true}
-  ],
-  requests: []
-};
 
 let db = {users:[],matches:[],requests:[],currentUserId:null};
 let ratingCache = {};
 let opponentOptions = [];
 
 async function api(path,options={}){
-  const response=await fetch(path,{method:options.method||'GET',headers:options.body?{'Content-Type':'application/json'}:undefined,body:options.body?JSON.stringify(options.body):undefined});
+  const method=options.method||'GET', headers=options.body?{'Content-Type':'application/json'}:{};
+  if(!['GET','HEAD','OPTIONS'].includes(method)&&db.csrfToken) headers['X-CSRF-Token']=db.csrfToken;
+  const response=await fetch(path,{method,headers,body:options.body?JSON.stringify(options.body):undefined,credentials:'same-origin'});
   const data=await response.json().catch(()=>({})); if(!response.ok) throw new Error(data.error||'Ошибка сервера.'); return data;
 }
 async function refreshState(){ db=await api('/api/state'); ratingCache=calculateRatings(); }
 async function mutate(path,body){ await api(path,{method:'POST',body}); await refreshState(); render(); }
-function saveDb(){ ratingCache=calculateRatings(); }
 function currentUser(){ return db.users.find(user=>user.id===db.currentUserId) || null; }
 function userById(id){ return db.users.find(user=>user.id===id); }
-function publicName(user){ return user ? `${user.firstName} ${user.lastName}` : 'Неизвестный игрок'; }
-function visibleName(user){ const me=currentUser(); return me && (me.id===user?.id || me.role==='admin') ? `${user.firstName} ${user.lastName}` : publicName(user); }
+function displayName(user){ return user ? `${user.firstName} ${user.lastName}` : 'Неизвестный игрок'; }
+function publicName(user){ return escapeHtml(displayName(user)); }
+function visibleName(user){ return displayName(user); }
 function initials(user){ return user ? `${user.firstName[0]}${user.lastName[0]}` : '?'; }
 function dateKey(timestamp){ const d=new Date(timestamp); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
 function formatDate(timestamp){ return new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short',year:new Date(timestamp).getFullYear()!==new Date().getFullYear()?'numeric':undefined}).format(timestamp); }
@@ -87,7 +58,7 @@ function renderAccount(){
   document.querySelector('#admin-nav').hidden=me?.role!=='admin';
   const area=document.querySelector('#account-area');
   if(!me){ area.innerHTML='<button class="login-button" data-action="open-auth">Войти</button>'; return; }
-  area.innerHTML=`<button class="account-button" data-profile="${me.id}" title="Открыть профиль"><span class="account-avatar">${initials(me)}</span><span class="account-name">${escapeHtml(me.firstName)}<small>${me.status==='pending'?'Ожидает подтверждения':me.role==='admin'?'Администратор':me.role==='teacher'?'Учитель':escapeHtml(me.className)}</small></span></button><button class="text-action" data-action="logout">Выйти</button>`;
+  area.innerHTML=`<button class="account-button" data-profile="${me.id}" title="Открыть профиль"><span class="account-avatar">${escapeHtml(initials(me))}</span><span class="account-name">${escapeHtml(me.firstName)}<small>${me.status==='pending'?'Ожидает подтверждения':me.role==='admin'?'Администратор':me.role==='teacher'?'Учитель':escapeHtml(me.className)}</small></span></button><button class="text-action" data-action="logout">Выйти</button>`;
 }
 
 function renderHome(){
@@ -157,7 +128,7 @@ function openMatchForm(){
   opponentOptions=players; form.reset(); form.opponent.value=''; form.scoreRequester.value=11; form.scoreOpponent.value=7;
   document.querySelector('#opponent-search').value=''; document.querySelector('#student-picker').classList.remove('selected');
   document.querySelector('#student-suggestions').hidden=true; document.querySelector('#opponent-search').setAttribute('aria-expanded','false');
-  document.querySelector('#requester-name').textContent=publicName(me);
+  document.querySelector('#requester-name').textContent=displayName(me);
   form.querySelector('[data-form-message]').textContent=''; document.querySelector('#match-dialog').showModal();
 }
 
@@ -171,7 +142,7 @@ function renderStudentSuggestions(query=''){
 function selectOpponent(id){
   const player=opponentOptions.find(item=>item.id===id); if(!player) return;
   const form=document.querySelector('#match-form'), search=document.querySelector('#opponent-search'), box=document.querySelector('#student-suggestions');
-  form.opponent.value=player.id; search.value=publicName(player); document.querySelector('#student-picker').classList.add('selected');
+  form.opponent.value=player.id; search.value=displayName(player); document.querySelector('#student-picker').classList.add('selected');
   box.hidden=true; search.setAttribute('aria-expanded','false'); form.querySelector('[data-form-message]').textContent='';
 }
 
@@ -186,11 +157,10 @@ function validateDailyRules(playerOne,playerTwo){
 }
 
 function requestById(id){ return db.requests.find(request=>request.id===id); }
-function requestLink(request){ return new URL(`/confirm/${request.token}`,location.origin).href; }
 function showQr(request){
-  const opponent=userById(request.opponent), requester=userById(request.requester), link=requestLink(request);
-  document.querySelector('#request-qr').src=`https://api.qrserver.com/v1/create-qr-code/?size=220x220&margin=0&data=${encodeURIComponent(link)}`;
-  document.querySelector('#request-summary').textContent=`${publicName(requester)} ${request.scoreRequester}:${request.scoreOpponent} ${publicName(opponent)}`;
+  const opponent=userById(request.opponent), requester=userById(request.requester);
+  document.querySelector('#request-qr').src=`/api/requests/${encodeURIComponent(request.id)}/qr?v=${Date.now()}`;
+  document.querySelector('#request-summary').textContent=`${displayName(requester)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(opponent)}`;
   const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=request.notified; button.textContent=request.notified?'Уведомление отправлено':'Отправить уведомление сопернику';
   document.querySelector('#notification-status').textContent=request.notified?'Соперник увидит заявку при входе в аккаунт.':'Можно использовать любой из двух способов подтверждения.';
   document.querySelector('#qr-dialog').showModal();
@@ -201,7 +171,7 @@ function openConfirmation(request){
   if(!me){ openAuth(); return; }
   if(me.id!==request.opponent){ toast('Подтвердить результат может только указанный соперник'); return; }
   const sender=userById(request.requester);
-  document.querySelector('#confirm-result').textContent=`${publicName(sender)} ${request.scoreRequester}:${request.scoreOpponent} ${publicName(me)}`;
+  document.querySelector('#confirm-result').textContent=`${displayName(sender)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(me)}`;
   document.querySelector('#accept-request').dataset.requestId=request.id; document.querySelector('#reject-request').dataset.requestId=request.id;
   document.querySelector('#confirm-dialog').showModal();
 }
@@ -231,7 +201,7 @@ function openProfile(id){
   const user=userById(id), stats=ratingCache[id]; if(!user||!stats) return;
   const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=db.matches.filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
   const rate=stats.games?Math.round(stats.wins/stats.games*100):0;
-  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${initials(user)}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
+  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
   document.querySelector('#profile-dialog').showModal();
 }
 
@@ -241,14 +211,14 @@ document.addEventListener('click',async event=>{
   const student=event.target.closest('[data-student]'); if(student){ selectOpponent(student.dataset.student); return; }
   const route=event.target.closest('[data-route]'); if(route){ event.preventDefault(); showView(route.dataset.route); return; }
   if(event.target.closest('[data-action="open-auth"]')) openAuth();
-  if(event.target.closest('[data-action="logout"]')){ if(db.oidcSession){location.href='/auth/silaeder/logout'}else{try{await mutate('/api/logout',{});toast('Вы вышли из аккаунта')}catch(error){toast(error.message)}} }
+  if(event.target.closest('[data-action="logout"]')){ try{if(db.oidcSession){const result=await api('/auth/silaeder/logout',{method:'POST',body:{}});location.href=result.redirect}else{await mutate('/api/logout',{});toast('Вы вышли из аккаунта')}}catch(error){toast(error.message)} }
   if(event.target.closest('[data-action="add-match"]')) openMatchForm();
   const profile=event.target.closest('[data-profile]'); if(profile) openProfile(profile.dataset.profile);
   const close=event.target.closest('[data-close]'); if(close) close.closest('dialog').close();
   const oidcButton=event.target.closest('#oidc-login-button'); if(oidcButton&&!db.oidcEnabled){event.preventDefault();toast('OIDC-клиент ещё не настроен')}
   const approve=event.target.closest('[data-approve]'); if(approve){ try{await mutate(`/api/admin/users/${approve.dataset.approve}/approve`,{});toast('Регистрация подтверждена')}catch(error){toast(error.message)} }
   const reject=event.target.closest('[data-reject]'); if(reject){ try{await mutate(`/api/admin/users/${reject.dataset.reject}/reject`,{});toast('Заявка отклонена')}catch(error){toast(error.message)} }
-  const toggle=event.target.closest('[data-toggle-user]'); if(toggle){ event.preventDefault(); const u=userById(toggle.dataset.toggleUser),action=u.status==='active'?'deactivate':'activate'; toggle.disabled=true; toggle.textContent='Сохраняем…'; try{await mutate(`/api/admin/users/${u.id}/${action}`,{});toast(action==='deactivate'?`${publicName(u)} теперь неактивен`:`${publicName(u)} снова активен`);showView('admin',false)}catch(error){toast(error.message)} return; }
+  const toggle=event.target.closest('[data-toggle-user]'); if(toggle){ event.preventDefault(); const u=userById(toggle.dataset.toggleUser),action=u.status==='active'?'deactivate':'activate'; toggle.disabled=true; toggle.textContent='Сохраняем…'; try{await mutate(`/api/admin/users/${u.id}/${action}`,{});toast(action==='deactivate'?`${displayName(u)} теперь неактивен`:`${displayName(u)} снова активен`);showView('admin',false)}catch(error){toast(error.message)} return; }
   const resolve=event.target.closest('[data-resolve]'); if(resolve){ try{await mutate(`/api/admin/matches/${resolve.dataset.resolve}/resolve`,{});toast('Жалоба закрыта')}catch(error){toast(error.message)} }
   const cancel=event.target.closest('[data-cancel-match]'); if(cancel){ try{await mutate(`/api/admin/matches/${cancel.dataset.cancel}/cancel`,{});toast('Матч отменён, рейтинг пересчитан')}catch(error){toast(error.message)} }
   const dispute=event.target.closest('[data-dispute]'); if(dispute){ const form=document.querySelector('#dispute-form');form.matchId.value=dispute.dataset.dispute;form.reset();form.matchId.value=dispute.dataset.dispute;document.querySelector('#dispute-dialog').showModal(); }

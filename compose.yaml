@@ -7,7 +7,7 @@ services:
     restart: unless-stopped
     init: true
     ports:
-      - "${PORT:-5000}:${PORT:-5000}"
+      - "${BIND_ADDRESS:-127.0.0.1}:${PORT:-5000}:${PORT:-5000}"
     env_file:
       - .env
     environment:
@@ -15,7 +15,8 @@ services:
       PORT: "${PORT:-5000}"
       TZ: Europe/Moscow
     volumes:
-      - tennis-data:/data
+      - tennis-data-v2:/data
+      - tennis-data:/legacy-data:ro
       - type: bind
         source: ./tennis.db
         target: /seed/tennis.db
@@ -25,7 +26,11 @@ services:
       - -c
       - |
         if [ ! -f "$${TENNIS_DB_PATH}" ]; then
-          cp /seed/tennis.db "$${TENNIS_DB_PATH}"
+          if [ -f /legacy-data/tennis.db ]; then
+            cp /legacy-data/tennis.db "$${TENNIS_DB_PATH}"
+          else
+            cp /seed/tennis.db "$${TENNIS_DB_PATH}"
+          fi
         fi
         exec waitress-serve --listen=0.0.0.0:$${PORT} app:app
     healthcheck:
@@ -39,6 +44,14 @@ services:
       retries: 5
       start_period: 10s
     stop_grace_period: 15s
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
 
 volumes:
   tennis-data:
+  tennis-data-v2:

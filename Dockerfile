@@ -7,10 +7,17 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 COPY requirements.txt ./
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir --timeout 120 --retries 8 -r requirements.txt
 
 COPY app.py app.js index.html styles.css ./
 COPY static ./static
+
+RUN groupadd --system --gid 10001 appuser \
+    && useradd --system --uid 10001 --gid appuser --home-dir /app --shell /usr/sbin/nologin appuser \
+    && mkdir -p /data /seed \
+    && chown -R appuser:appuser /app /data /seed
+
+USER appuser
 
 EXPOSE 5000
 

@@ -1,19 +1,25 @@
 import math
 import hashlib
+import io
 import json
 import os
 import secrets
 import smtplib
 import sqlite3
+import threading
 import time
+from datetime import timedelta
 from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
-from urllib.parse import urlencode
+from urllib.parse import urlencode, urlsplit
 
+import qrcode
+import qrcode.image.svg
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv
-from flask import Flask, jsonify, redirect, request, send_from_directory, session, url_for
+from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, session
+from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
 
 ROOT = Path(__file__).resolve().parent
@@ -23,15 +29,34 @@ ELO_START = 1000
 ELO_K = 24
 
 app = Flask(__name__, static_folder=None)
+if os.environ.get("TRUST_PROXY_HEADERS", "false").lower() == "true":
+    app.wsgi_app = ProxyFix(app.wsgi_app, x_for=1, x_proto=1, x_host=1)
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 APP_URL = os.environ.get("APP_URL", "http://127.0.0.1:5000").rstrip("/")
+QR_BASE_URL = os.environ.get("QR_BASE_URL", APP_URL).rstrip("/")
+ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
+SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
 OIDC_ISSUER = os.environ.get("CRM_OIDC_ISSUER", "https://lk.silaeder.ru").rstrip("/")
 OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and all(
     os.environ.get(key) for key in ("SECRET_KEY", "CRM_OIDC_CLIENT_ID", "CRM_OIDC_CLIENT_SECRET")
 )
 OIDC_REDIRECT_URI = os.environ.get("CRM_OIDC_REDIRECT_URI", f"{APP_URL}/auth/silaeder/callback")
 OIDC_LOGOUT_REDIRECT_URI = os.environ.get("CRM_OIDC_POST_LOGOUT_REDIRECT_URI", f"{APP_URL}/auth/silaeder/logout/callback")
-app.config.update(SESSION_COOKIE_HTTPONLY=True, SESSION_COOKIE_SAMESITE="Lax", SESSION_COOKIE_SECURE=APP_URL.startswith("https://"))
+app.config.update(
+    MAX_CONTENT_LENGTH=32 * 1024,
+    PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SAMESITE="Lax",
+    SESSION_COOKIE_SECURE=APP_URL.startswith("https://"),
+    SESSION_COOKIE_NAME="tennis_session",
+    SESSION_REFRESH_EACH_REQUEST=False,
+)
+
+LOGIN_WINDOW_SECONDS = 15 * 60
+LOGIN_MAX_FAILURES = 5
+login_failures = {}
+login_failures_lock = threading.Lock()
+DUMMY_PASSWORD_HASH = generate_password_hash(secrets.token_urlsafe(32))
 
 oauth = OAuth(app)
 if OIDC_ENABLED:
@@ -64,6 +89,37 @@ def valid_score(a, b):
     if a == b or high < 11:
         return False
     return high == 11 if low < 10 else high - low == 2
+
+
+def clean_text(value, field, max_length, required=True):
+    text = str(value or "").strip()
+    if required and not text:
+        raise ValueError(f"Поле «{field}» обязательно.")
+    if len(text) > max_length:
+        raise ValueError(f"Поле «{field}» не должно быть длиннее {max_length} символов.")
+    return text
+
+
+def login_key(login):
+    return request.remote_addr or "unknown", str(login or "").strip().lower()[:64]
+
+
+def login_is_limited(key):
+    cutoff = time.time() - LOGIN_WINDOW_SECONDS
+    with login_failures_lock:
+        recent = [stamp for stamp in login_failures.get(key, []) if stamp >= cutoff]
+        login_failures[key] = recent
+        return len(recent) >= LOGIN_MAX_FAILURES
+
+
+def record_login_failure(key):
+    with login_failures_lock:
+        login_failures.setdefault(key, []).append(time.time())
+
+
+def clear_login_failures(key):
+    with login_failures_lock:
+        login_failures.pop(key, None)
 
 
 def init_db():
@@ -112,29 +168,37 @@ def init_db():
             connection.execute("ALTER TABLE users ADD COLUMN email TEXT")
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) WHERE email IS NOT NULL AND email != ''")
         if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
-            seed_users = [
-                ("admin", "Администратор", "Школы", "", "admin", "admin", "admin", 0),
-                ("u1", "Максим", "Орлов", "10Б", "maxim", "123456", "user", 1),
-                ("u2", "Анна", "Белова", "9А", "anna", "123456", "user", 1),
-                ("u3", "Илья", "Соколов", "11А", "ilya", "123456", "user", 1),
-                ("u4", "Мария", "Волкова", "8В", "maria", "123456", "user", 1),
-                ("u5", "Артём", "Кузнецов", "10А", "artem", "123456", "user", 1),
-                ("u6", "София", "Лебедева", "9Б", "sofia", "123456", "user", 1),
-                ("u7", "Даниил", "Морозов", "8А", "daniil", "123456", "user", 1),
-                ("u8", "Ева", "Новикова", "7Б", "eva", "123456", "user", 1),
-            ]
+            if len(ADMIN_PASSWORD) < 12:
+                raise RuntimeError("Для первого запуска задайте ADMIN_PASSWORD длиной не менее 12 символов.")
+            seed_users = [("admin", "Администратор", "Школы", "", "admin", ADMIN_PASSWORD, "admin", 0)]
+            if SEED_DEMO_DATA:
+                seed_users.extend([
+                    ("u1", "Максим", "Орлов", "10Б", "maxim", secrets.token_urlsafe(24), "user", 1),
+                    ("u2", "Анна", "Белова", "9А", "anna", secrets.token_urlsafe(24), "user", 1),
+                    ("u3", "Илья", "Соколов", "11А", "ilya", secrets.token_urlsafe(24), "user", 1),
+                    ("u4", "Мария", "Волкова", "8В", "maria", secrets.token_urlsafe(24), "user", 1),
+                    ("u5", "Артём", "Кузнецов", "10А", "artem", secrets.token_urlsafe(24), "user", 1),
+                    ("u6", "София", "Лебедева", "9Б", "sofia", secrets.token_urlsafe(24), "user", 1),
+                    ("u7", "Даниил", "Морозов", "8А", "daniil", secrets.token_urlsafe(24), "user", 1),
+                    ("u8", "Ева", "Новикова", "7Б", "eva", secrets.token_urlsafe(24), "user", 1),
+                ])
             created = now_ms() - 20 * 86_400_000
             connection.executemany(
                 "INSERT INTO users(id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at) VALUES (?,?,?,?,?,?,?,?,?,?)",
                 [(uid, first, last, cls, login, generate_password_hash(password), role, "active", player, created)
                  for uid, first, last, cls, login, password, role, player in seed_users],
             )
-            scores = [("u1","u2",11,8),("u3","u5",13,11),("u4","u6",7,11),("u1","u3",11,9),
-                      ("u2","u4",11,5),("u5","u7",11,6),("u6","u8",11,4),("u1","u4",12,10),
-                      ("u2","u3",9,11),("u5","u6",8,11)]
-            for index, (p1, p2, s1, s2) in enumerate(scores):
-                connection.execute("INSERT INTO matches(id,player_one,player_two,score_one,score_two,confirmed_by,created_at) VALUES(?,?,?,?,?,?,?)",
-                                   (f"m{index+1}", p1, p2, s1, s2, p2, now_ms()-(10-index)*86_400_000))
+            if SEED_DEMO_DATA:
+                scores = [("u1","u2",11,8),("u3","u5",13,11),("u4","u6",7,11),("u1","u3",11,9),
+                          ("u2","u4",11,5),("u5","u7",11,6),("u6","u8",11,4),("u1","u4",12,10),
+                          ("u2","u3",9,11),("u5","u6",8,11)]
+                for index, (p1, p2, s1, s2) in enumerate(scores):
+                    connection.execute("INSERT INTO matches(id,player_one,player_two,score_one,score_two,confirmed_by,created_at) VALUES(?,?,?,?,?,?,?)",
+                                       (f"m{index+1}", p1, p2, s1, s2, p2, now_ms()-(10-index)*86_400_000))
+        admin = connection.execute("SELECT id,password_hash FROM users WHERE role='admin' ORDER BY created_at LIMIT 1").fetchone()
+        if admin and len(ADMIN_PASSWORD) >= 12 and not check_password_hash(admin["password_hash"], ADMIN_PASSWORD):
+            connection.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(ADMIN_PASSWORD), admin["id"]))
+        connection.execute("DELETE FROM oidc_sessions")
 
 
 def user_row(user_id):
@@ -170,12 +234,13 @@ def require_admin(handler):
 
 def serialize_user(row, viewer):
     can_see_full = viewer and (viewer["role"] == "admin" or viewer["id"] == row["id"])
-    return {"id": row["id"], "firstName": row["first_name"],
-            "lastName": row["last_name"],
-            "className": row["class_name"], "login": row["login"] if can_see_full else "",
-            "email": row["email"] if can_see_full and "email" in row.keys() else "",
-            "role": row["role"], "status": row["status"], "isPlayer": bool(row["is_player"]),
-            "createdAt": row["created_at"]}
+    data = {"id": row["id"], "firstName": row["first_name"], "lastName": row["last_name"],
+            "status": row["status"], "isPlayer": bool(row["is_player"])}
+    if can_see_full:
+        data.update(className=row["class_name"], login=row["login"],
+                    email=row["email"] if "email" in row.keys() else "",
+                    role=row["role"], createdAt=row["created_at"])
+    return data
 
 
 @app.get("/")
@@ -191,14 +256,43 @@ def assets(filename):
     return "Not found", 404
 
 
+@app.before_request
+def validate_unsafe_request():
+    if request.method not in {"POST", "PUT", "PATCH", "DELETE"}:
+        return None
+    origin = request.headers.get("Origin")
+    allowed_origins = {APP_URL, request.host_url.rstrip("/")}
+    if origin and origin.rstrip("/") not in allowed_origins:
+        return jsonify(error="Запрос с другого сайта отклонён."), 403
+    supplied = request.headers.get("X-CSRF-Token", "")
+    expected = session.get("csrf_token", "")
+    if not expected or not supplied or not secrets.compare_digest(supplied, expected):
+        return jsonify(error="Защитный токен устарел. Обновите страницу."), 403
+    return None
+
+
 @app.after_request
-def disable_frontend_cache(response):
-    """Always serve the current UI while the school server is being updated."""
-    if request.path in {"/", "/index.html", "/app.js", "/styles.css"} or request.path.startswith("/confirm/"):
+def security_headers(response):
+    if request.path in {"/", "/index.html", "/app.js", "/styles.css"} or request.path.startswith(("/confirm/", "/api/", "/auth/")):
         response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         response.headers["Pragma"] = "no-cache"
         response.headers["Expires"] = "0"
+    response.headers["Content-Security-Policy"] = (
+        "default-src 'self'; base-uri 'none'; object-src 'none'; frame-ancestors 'none'; "
+        "form-action 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self'"
+    )
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["Referrer-Policy"] = "no-referrer"
+    response.headers["Permissions-Policy"] = "camera=(), microphone=(), geolocation=(), payment=(), usb=()"
+    if request.is_secure:
+        response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
     return response
+
+
+@app.errorhandler(413)
+def request_too_large(error):
+    return jsonify(error="Запрос слишком большой."), 413
 
 
 @app.get("/static/<path:filename>")
@@ -209,9 +303,24 @@ def static_assets(filename):
 @app.get("/api/state")
 def state():
     viewer = current_user()
+    csrf_token = session.setdefault("csrf_token", secrets.token_urlsafe(32))
     with db() as connection:
-        users = [serialize_user(row, viewer) for row in connection.execute("SELECT * FROM users ORDER BY created_at")]
-        matches = [dict(row) for row in connection.execute("SELECT * FROM matches ORDER BY created_at")]
+        if viewer and viewer["role"] == "admin":
+            user_rows = connection.execute("SELECT * FROM users ORDER BY created_at").fetchall()
+            match_rows = connection.execute("SELECT * FROM matches ORDER BY created_at").fetchall()
+        else:
+            viewer_id = viewer["id"] if viewer else ""
+            user_rows = connection.execute("""
+                SELECT * FROM users WHERE
+                  (status='active' AND is_player=1) OR id=? OR id IN (
+                    SELECT player_one FROM matches WHERE active=1
+                    UNION SELECT player_two FROM matches WHERE active=1
+                  )
+                ORDER BY created_at
+            """, (viewer_id,)).fetchall()
+            match_rows = connection.execute("SELECT * FROM matches WHERE active=1 ORDER BY created_at").fetchall()
+        users = [serialize_user(row, viewer) for row in user_rows]
+        matches = [dict(row) for row in match_rows]
         requests_rows = []
         if viewer:
             if viewer["role"] == "admin":
@@ -219,13 +328,24 @@ def state():
             else:
                 rows = connection.execute("SELECT * FROM requests WHERE requester=? OR opponent=? ORDER BY created_at", (viewer["id"], viewer["id"])).fetchall()
             requests_rows = [dict(row) for row in rows]
-    matches_json = [{"id":m["id"],"playerOne":m["player_one"],"playerTwo":m["player_two"],"scoreOne":m["score_one"],"scoreTwo":m["score_two"],"confirmedBy":m["confirmed_by"],"createdAt":m["created_at"],"active":bool(m["active"]),
-                     **({"dispute":{"userId":m["dispute_user"],"reason":m["dispute_reason"]}} if m["dispute_user"] else {})} for m in matches]
-    requests_json = [{"id":r["id"],"token":r["token"],"requester":r["requester"],"opponent":r["opponent"],"scoreRequester":r["score_requester"],"scoreOpponent":r["score_opponent"],"status":r["status"],"notified":bool(r["notified"]),"createdAt":r["created_at"]} for r in requests_rows]
+    matches_json = []
+    for m in matches:
+        item = {"id":m["id"],"playerOne":m["player_one"],"playerTwo":m["player_two"],
+                "scoreOne":m["score_one"],"scoreTwo":m["score_two"],
+                "createdAt":m["created_at"],"active":bool(m["active"])}
+        if viewer and viewer["role"] == "admin":
+            item["confirmedBy"] = m["confirmed_by"]
+        if m["dispute_user"] and viewer and (viewer["role"] == "admin" or viewer["id"] in {m["player_one"], m["player_two"]}):
+            item["dispute"] = {"userId":m["dispute_user"],"reason":m["dispute_reason"]}
+        matches_json.append(item)
+    requests_json = [{"id":r["id"],"token":r["token"] if viewer and viewer["id"] == r["requester"] else "",
+                      "requester":r["requester"],"opponent":r["opponent"],
+                      "scoreRequester":r["score_requester"],"scoreOpponent":r["score_opponent"],
+                      "status":r["status"],"notified":bool(r["notified"]),"createdAt":r["created_at"]} for r in requests_rows]
     return jsonify(users=users, matches=matches_json, requests=requests_json,
                    currentUserId=viewer["id"] if viewer else None,
                    oidcEnabled=OIDC_ENABLED, oidcSession=bool(session.get("oidc_login")),
-                   authMessage=session.pop("auth_message", None))
+                   csrfToken=csrf_token, authMessage=session.pop("auth_message", None))
 
 
 def normalized_oidc_claims(userinfo):
@@ -233,7 +353,9 @@ def normalized_oidc_claims(userinfo):
     if isinstance(roles, str):
         roles = [item.strip() for item in roles.replace(",", " ").split()]
     roles = {str(item).lower() for item in roles}
-    if "admin" in roles or "teacher" in roles:
+    if "admin" in roles:
+        local_role = "admin"
+    elif "teacher" in roles:
         local_role = "teacher"
     elif "student" in roles:
         local_role = "user"
@@ -247,11 +369,11 @@ def normalized_oidc_claims(userinfo):
         first_name, last_name = parts[0], parts[1] if len(parts) > 1 else ""
     return {
         "issuer": OIDC_ISSUER,
-        "subject": str(userinfo.get("sub") or "").strip(),
-        "first_name": first_name,
-        "last_name": last_name or "—",
-        "email": str(userinfo.get("email") or "").strip().lower(),
-        "class_name": str(userinfo.get("class_name") or userinfo.get("class") or userinfo.get("grade") or "").strip(),
+        "subject": str(userinfo.get("sub") or "").strip()[:255],
+        "first_name": first_name[:80],
+        "last_name": (last_name or "—")[:80],
+        "email": str(userinfo.get("email") or "").strip().lower()[:254],
+        "class_name": str(userinfo.get("class_name") or userinfo.get("class") or userinfo.get("grade") or "").strip()[:20],
         "role": local_role,
     }
 
@@ -327,16 +449,14 @@ def silaeder_callback():
                 connection.execute("INSERT INTO users(id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at,email) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                                    (user_id, claims["first_name"], claims["last_name"], claims["class_name"], login, generate_password_hash(secrets.token_urlsafe(32)), claims["role"], "active", 1, now_ms(), claims["email"] or None))
                 connection.execute("INSERT INTO oidc_identities VALUES(?,?,?,?)", (claims["issuer"], claims["subject"], user_id, now_ms()))
-        oidc_session_id = secrets.token_urlsafe(24)
-        with db() as connection:
-            connection.execute("INSERT INTO oidc_sessions VALUES(?,?,?,?)", (oidc_session_id, user_id, token.get("id_token"), now_ms()))
         session.clear()
+        session.permanent = True
         session["user_id"] = user_id
         session["oidc_login"] = True
-        session["oidc_session_id"] = oidc_session_id
         return redirect("/#home")
     except Exception as error:
-        session["auth_message"] = f"Не удалось выполнить школьный вход: {error}"
+        app.logger.exception("OIDC login failed")
+        session["auth_message"] = "Не удалось выполнить школьный вход. Попробуйте ещё раз или обратитесь к администратору."
         return redirect("/#home")
 
 
@@ -353,21 +473,15 @@ def silaeder_link(raw_token):
         update_user_from_oidc(connection, link["user_id"], claims)
         connection.execute("DELETE FROM account_link_tokens WHERE token_hash=?", (token_hash,))
     session.clear()
+    session.permanent = True
     session["user_id"] = link["user_id"]
     session["oidc_login"] = True
     session["auth_message"] = "Аккаунт ЛК Силаэдра успешно привязан."
     return redirect("/#home")
 
 
-@app.get("/auth/silaeder/logout")
+@app.post("/auth/silaeder/logout")
 def silaeder_logout():
-    oidc_session_id = session.get("oidc_session_id")
-    id_token = None
-    if oidc_session_id:
-        with db() as connection:
-            oidc_session = connection.execute("SELECT id_token FROM oidc_sessions WHERE id=?", (oidc_session_id,)).fetchone()
-            id_token = oidc_session["id_token"] if oidc_session else None
-            connection.execute("DELETE FROM oidc_sessions WHERE id=?", (oidc_session_id,))
     session.clear()
     if OIDC_ENABLED:
         try:
@@ -375,12 +489,10 @@ def silaeder_logout():
             endpoint = metadata.get("end_session_endpoint")
             if endpoint:
                 params = {"post_logout_redirect_uri": OIDC_LOGOUT_REDIRECT_URI}
-                if id_token:
-                    params["id_token_hint"] = id_token
-                return redirect(f"{endpoint}?{urlencode(params)}")
+                return jsonify(redirect=f"{endpoint}?{urlencode(params)}")
         except Exception:
             pass
-    return redirect("/#home")
+    return jsonify(redirect="/#home")
 
 
 @app.get("/auth/silaeder/logout/callback")
@@ -391,16 +503,33 @@ def silaeder_logout_callback():
 
 @app.post("/api/login")
 def login():
-    data=request.get_json() or {}
+    data=request.get_json(silent=True) or {}
+    try:
+        login_name = clean_text(data.get("login"), "Логин", 64)
+        password = clean_text(data.get("password"), "Пароль", 256)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    key = login_key(login_name)
+    if login_is_limited(key):
+        response = jsonify(error="Слишком много попыток входа. Повторите через 15 минут.")
+        response.status_code = 429
+        response.headers["Retry-After"] = str(LOGIN_WINDOW_SECONDS)
+        return response
     with db() as connection:
-        user=connection.execute("SELECT * FROM users WHERE lower(login)=lower(?)",(data.get("login", ""),)).fetchone()
-    if not user or not check_password_hash(user["password_hash"],data.get("password", "")):
+        user=connection.execute("SELECT * FROM users WHERE lower(login)=lower(?)",(login_name,)).fetchone()
+    password_hash = user["password_hash"] if user else DUMMY_PASSWORD_HASH
+    if not check_password_hash(password_hash, password):
+        record_login_failure(key)
         return jsonify(error="Неверный логин или пароль."),400
+    clear_login_failures(key)
+    if user["role"] == "admin" and check_password_hash(user["password_hash"], "admin"):
+        return jsonify(error="Стандартный пароль администратора отключён. Задайте ADMIN_PASSWORD."), 403
     if user["status"] in {"inactive","rejected"}:
         return jsonify(error="Аккаунт недоступен. Обратитесь к администратору."),403
     if OIDC_ENABLED and user["role"] != "admin":
         return jsonify(error="Для учеников и учителей используйте вход через ЛК Силаэдра."),403
     session.clear()
+    session.permanent = True
     session["user_id"]=user["id"]
     return jsonify(ok=True)
 
@@ -414,14 +543,22 @@ def logout():
 def register():
     if OIDC_ENABLED:
         return jsonify(error="Регистрация выполняется через ЛК Силаэдра."),410
-    data=request.get_json() or {}
-    required=["firstName","lastName","className","login","password"]
-    if any(not str(data.get(key,"")).strip() for key in required) or len(data["password"])<6:
-        return jsonify(error="Заполните все поля. Пароль — не короче 6 символов."),400
+    data=request.get_json(silent=True) or {}
+    try:
+        first_name = clean_text(data.get("firstName"), "Имя", 80)
+        last_name = clean_text(data.get("lastName"), "Фамилия", 80)
+        class_name = clean_text(data.get("className"), "Класс", 20)
+        login_name = clean_text(data.get("login"), "Логин", 64)
+        password = clean_text(data.get("password"), "Пароль", 256)
+        if len(password) < 12:
+            raise ValueError("Пароль должен содержать не менее 12 символов.")
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
     uid=f"u-{secrets.token_hex(8)}"
     try:
         with db() as connection:
-            connection.execute("INSERT INTO users VALUES(?,?,?,?,?,?,?,?,?,?)",(uid,data["firstName"].strip(),data["lastName"].strip(),data["className"].strip().upper(),data["login"].strip(),generate_password_hash(data["password"]),"user","pending",1,now_ms()))
+            connection.execute("INSERT INTO users(id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+                               (uid,first_name,last_name,class_name.upper(),login_name,generate_password_hash(password),"user","pending",1,now_ms()))
     except sqlite3.IntegrityError:
         return jsonify(error="Этот логин уже занят."),409
     session["user_id"]=uid
@@ -431,7 +568,11 @@ def register():
 @app.get("/api/users/search")
 @require_user
 def search_users(viewer):
-    query=f"%{request.args.get('q','').strip()}%"
+    try:
+        raw_query = clean_text(request.args.get("q", ""), "Поиск", 80, required=False)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    query=f"%{raw_query}%"
     with db() as connection:
         rows=connection.execute("SELECT * FROM users WHERE status='active' AND is_player=1 AND id!=? AND (first_name LIKE ? OR last_name LIKE ? OR class_name LIKE ?) LIMIT 8",(viewer["id"],query,query,query)).fetchall()
     return jsonify(users=[serialize_user(row,None) for row in rows])
@@ -448,6 +589,8 @@ def same_pair_today(connection,p1,p2,include_requests=True):
 @require_user
 def create_request(user):
     data=request.get_json() or {}; opponent=data.get("opponent")
+    if not isinstance(opponent, str) or len(opponent) > 80:
+        return jsonify(error="Некорректный соперник."), 400
     try: s1,s2=int(data.get("scoreRequester")),int(data.get("scoreOpponent"))
     except (TypeError,ValueError): return jsonify(error="Некорректный счёт."),400
     if opponent==user["id"] or not valid_score(s1,s2): return jsonify(error="Проверьте соперника и счёт матча."),400
@@ -466,6 +609,21 @@ def notify_request(user,rid):
     with db() as connection:
         result=connection.execute("UPDATE requests SET notified=1 WHERE id=? AND requester=? AND status='pending'",(rid,user["id"]))
     return (jsonify(ok=True) if result.rowcount else (jsonify(error="Заявка не найдена."),404))
+
+
+@app.get("/api/requests/<rid>/qr")
+@require_user
+def request_qr(user, rid):
+    with db() as connection:
+        row = connection.execute("SELECT token FROM requests WHERE id=? AND requester=? AND status='pending'", (rid, user["id"])).fetchone()
+    if not row:
+        return jsonify(error="Заявка не найдена."), 404
+    confirmation_url = f"{QR_BASE_URL}/confirm/{row['token']}"
+    image = qrcode.make(confirmation_url, image_factory=qrcode.image.svg.SvgPathImage, box_size=8, border=2)
+    output = io.BytesIO()
+    image.save(output)
+    output.seek(0)
+    return send_file(output, mimetype="image/svg+xml", max_age=0)
 
 
 @app.post("/api/requests/<rid>/<action>")
@@ -504,7 +662,10 @@ def admin_user(admin,uid,action):
 @app.post("/api/matches/<mid>/dispute")
 @require_user
 def dispute_match(user,mid):
-    reason=(request.get_json() or {}).get("reason","").strip()
+    try:
+        reason=clean_text((request.get_json(silent=True) or {}).get("reason"), "Комментарий", 1000)
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
     with db() as connection:
         match=connection.execute("SELECT * FROM matches WHERE id=? AND active=1",(mid,)).fetchone()
         if not match or user["id"] not in {match["player_one"],match["player_two"]}: return jsonify(error="Матч не найден."),404
