@@ -28,10 +28,12 @@ services:
         if [ ! -f "$${TENNIS_DB_PATH}" ]; then
           if [ -f /legacy-data/tennis.db ]; then
             cp /legacy-data/tennis.db "$${TENNIS_DB_PATH}"
-          else
+        else
             cp /seed/tennis.db "$${TENNIS_DB_PATH}"
           fi
         fi
+        flask --app app db upgrade
+        flask --app app seed-data
         exec waitress-serve --listen=0.0.0.0:$${PORT} app:app
     healthcheck:
       test:

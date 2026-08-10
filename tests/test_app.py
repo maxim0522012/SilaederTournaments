@@ -3,6 +3,7 @@ import tempfile
 import unittest
 
 from werkzeug.security import generate_password_hash
+from flask_migrate import upgrade
 
 TEMP_DIR = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
 os.environ["TENNIS_DB_PATH"] = os.path.join(TEMP_DIR.name, "test.db")
@@ -11,7 +12,11 @@ os.environ["ADMIN_PASSWORD"] = "test-admin-password-123"
 os.environ["CRM_OIDC_ENABLED"] = "false"
 os.environ["SEED_DEMO_DATA"] = "false"
 
-from app import app, clear_login_failures, db, update_user_from_oidc  # noqa: E402
+from app import ROOT, app, clear_login_failures, db, seed_database, update_user_from_oidc  # noqa: E402
+
+with app.app_context():
+    upgrade(directory=str(ROOT / "migrations"))
+    seed_database()
 
 
 class ServerFlowTest(unittest.TestCase):

@@ -19,8 +19,11 @@ import qrcode.image.svg
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, session
+from flask_migrate import Migrate, upgrade
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
+
+from schema import schema_db
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -51,7 +54,11 @@ app.config.update(
     SESSION_COOKIE_SECURE=APP_URL.startswith("https://"),
     SESSION_COOKIE_NAME="tennis_session",
     SESSION_REFRESH_EACH_REQUEST=False,
+    SQLALCHEMY_DATABASE_URI=f"sqlite:///{DB_PATH.resolve().as_posix()}",
+    SQLALCHEMY_TRACK_MODIFICATIONS=False,
 )
+schema_db.init_app(app)
+migrate = Migrate(app, schema_db, compare_type=True, render_as_batch=True)
 
 LOGIN_WINDOW_SECONDS = 15 * 60
 LOGIN_MAX_FAILURES = 5
@@ -123,90 +130,8 @@ def clear_login_failures(key):
         login_failures.pop(key, None)
 
 
-def init_db():
+def seed_database():
     with db() as connection:
-        connection.executescript("""
-        CREATE TABLE IF NOT EXISTS users (
-          id TEXT PRIMARY KEY, first_name TEXT NOT NULL, last_name TEXT NOT NULL,
-          class_name TEXT NOT NULL DEFAULT '', login TEXT NOT NULL UNIQUE,
-          password_hash TEXT NOT NULL, role TEXT NOT NULL DEFAULT 'user',
-          status TEXT NOT NULL DEFAULT 'pending', is_player INTEGER NOT NULL DEFAULT 1,
-          created_at INTEGER NOT NULL, email TEXT
-        );
-        CREATE TABLE IF NOT EXISTS matches (
-          id TEXT PRIMARY KEY, player_one TEXT NOT NULL, player_two TEXT NOT NULL,
-          score_one INTEGER NOT NULL, score_two INTEGER NOT NULL,
-          confirmed_by TEXT, created_at INTEGER NOT NULL, active INTEGER NOT NULL DEFAULT 1,
-          dispute_user TEXT, dispute_reason TEXT,
-          FOREIGN KEY(player_one) REFERENCES users(id), FOREIGN KEY(player_two) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS requests (
-          id TEXT PRIMARY KEY, token TEXT NOT NULL UNIQUE, requester TEXT NOT NULL,
-          opponent TEXT NOT NULL, score_requester INTEGER NOT NULL, score_opponent INTEGER NOT NULL,
-          status TEXT NOT NULL DEFAULT 'pending', notified INTEGER NOT NULL DEFAULT 0,
-          created_at INTEGER NOT NULL, resolved_at INTEGER,
-          FOREIGN KEY(requester) REFERENCES users(id), FOREIGN KEY(opponent) REFERENCES users(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_matches_created ON matches(created_at);
-        CREATE INDEX IF NOT EXISTS idx_requests_opponent_status ON requests(opponent, status);
-        CREATE TABLE IF NOT EXISTS oidc_identities (
-          issuer TEXT NOT NULL, subject TEXT NOT NULL, user_id TEXT NOT NULL,
-          created_at INTEGER NOT NULL, PRIMARY KEY(issuer, subject),
-          FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS account_link_tokens (
-          token_hash TEXT PRIMARY KEY, user_id TEXT NOT NULL, issuer TEXT NOT NULL,
-          subject TEXT NOT NULL, claims_json TEXT NOT NULL, expires_at INTEGER NOT NULL,
-          FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS oidc_sessions (
-          id TEXT PRIMARY KEY, user_id TEXT NOT NULL, id_token TEXT,
-          created_at INTEGER NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS tournaments (
-          id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
-          registration_deadline INTEGER NOT NULL, start_at INTEGER NOT NULL,
-          max_players INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'registration',
-          champion_id TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
-          completed_at INTEGER,
-          FOREIGN KEY(champion_id) REFERENCES users(id),
-          FOREIGN KEY(created_by) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS tournament_participants (
-          tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, seed INTEGER,
-          losses INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0,
-          joined_at INTEGER NOT NULL,
-          PRIMARY KEY(tournament_id, user_id),
-          FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
-          FOREIGN KEY(user_id) REFERENCES users(id)
-        );
-        CREATE TABLE IF NOT EXISTS tournament_matches (
-          id TEXT PRIMARY KEY, tournament_id TEXT NOT NULL, sequence INTEGER NOT NULL,
-          stage TEXT NOT NULL, round_number INTEGER NOT NULL, position INTEGER NOT NULL,
-          player_one TEXT NOT NULL, player_two TEXT, winner TEXT, loser TEXT,
-          status TEXT NOT NULL DEFAULT 'pending', result_match_id TEXT,
-          created_at INTEGER NOT NULL, completed_at INTEGER,
-          FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
-          FOREIGN KEY(player_one) REFERENCES users(id), FOREIGN KEY(player_two) REFERENCES users(id),
-          FOREIGN KEY(winner) REFERENCES users(id), FOREIGN KEY(loser) REFERENCES users(id),
-          FOREIGN KEY(result_match_id) REFERENCES matches(id)
-        );
-        CREATE INDEX IF NOT EXISTS idx_tournament_participants_tournament
-          ON tournament_participants(tournament_id, eliminated, losses);
-        CREATE INDEX IF NOT EXISTS idx_tournament_matches_tournament_sequence
-          ON tournament_matches(tournament_id, sequence, position);
-        """)
-        columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
-        if "email" not in columns:
-            connection.execute("ALTER TABLE users ADD COLUMN email TEXT")
-        request_columns = {row["name"] for row in connection.execute("PRAGMA table_info(requests)")}
-        if "tournament_match_id" not in request_columns:
-            connection.execute("ALTER TABLE requests ADD COLUMN tournament_match_id TEXT")
-        match_columns = {row["name"] for row in connection.execute("PRAGMA table_info(matches)")}
-        if "tournament_match_id" not in match_columns:
-            connection.execute("ALTER TABLE matches ADD COLUMN tournament_match_id TEXT")
-        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) WHERE email IS NOT NULL AND email != ''")
-        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_tournament_pending ON requests(tournament_match_id) WHERE tournament_match_id IS NOT NULL AND status='pending'")
         if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             if len(ADMIN_PASSWORD) < 12:
                 raise RuntimeError("Для первого запуска задайте ADMIN_PASSWORD длиной не менее 12 символов.")
@@ -1022,7 +947,13 @@ def admin_match(admin,mid,action):
     return jsonify(ok=True)
 
 
-init_db()
+@app.cli.command("seed-data")
+def seed_data_command():
+    """Create the first administrator and optional demo data after migrations."""
+    seed_database()
 
 if __name__ == "__main__":
+    with app.app_context():
+        upgrade(directory=str(ROOT / "migrations"))
+        seed_database()
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", "5000")), debug=True)

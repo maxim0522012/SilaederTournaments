@@ -35,4 +35,21 @@ docker compose down
 docker compose up -d --build
 ```
 
+Перед каждым запуском контейнер автоматически выполняет `flask db upgrade`, поэтому новые версии схемы применяются к существующей базе без удаления аккаунтов и матчей. Затем команда `flask seed-data` создаёт администратора только в том случае, если база пуста.
+
+Проверить текущую версию миграции:
+
+```powershell
+docker compose exec tennis flask --app app db current
+```
+
+Новые миграции создаются во время разработки и должны сохраняться в каталоге `migrations`:
+
+```powershell
+.venv\Scripts\python.exe -m flask --app app db migrate -m "описание изменения"
+.venv\Scripts\python.exe -m flask --app app db upgrade
+```
+
+На рабочем сервере используйте только `db upgrade`; команда `db migrate` предназначена для разработки.
+
 Актуальные данные хранятся в volume `tennis-data-v2`. Старый `tennis-data` подключён только для чтения и оставлен для безопасного отката. Команда `docker compose down -v` удалит оба volume вместе с Docker-копиями базы данных.
