@@ -1,9 +1,10 @@
 const ELO_START = 1000;
 const ELO_K = 24;
 
-let db = {users:[],matches:[],requests:[],currentUserId:null};
+let db = {users:[],matches:[],requests:[],tournaments:[],currentUserId:null};
 let ratingCache = {};
 let opponentOptions = [];
+let selectedTournamentId = null;
 
 async function api(path,options={}){
   const method=options.method||'GET', headers=options.body?{'Content-Type':'application/json'}:{};
@@ -21,6 +22,8 @@ function visibleName(user){ return displayName(user); }
 function initials(user){ return user ? `${user.firstName[0]}${user.lastName[0]}` : '?'; }
 function dateKey(timestamp){ const d=new Date(timestamp); return `${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`; }
 function formatDate(timestamp){ return new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short',year:new Date(timestamp).getFullYear()!==new Date().getFullYear()?'numeric':undefined}).format(timestamp); }
+function formatDateTime(timestamp){ return new Intl.DateTimeFormat('ru-RU',{day:'numeric',month:'short',hour:'2-digit',minute:'2-digit'}).format(timestamp); }
+function localDateTimeValue(timestamp){ const date=new Date(timestamp); return new Date(date.getTime()-date.getTimezoneOffset()*60000).toISOString().slice(0,16); }
 function uid(prefix){ return `${prefix}-${Date.now()}-${Math.random().toString(16).slice(2)}`; }
 function escapeHtml(value=''){ const el=document.createElement('div'); el.textContent=String(value); return el.innerHTML; }
 
@@ -47,7 +50,7 @@ function rankedPlayers(includeInactive=false){
 
 function render(){
   ratingCache=calculateRatings();
-  renderAccount(); renderHome(); renderNotifications(); renderAdmin();
+  renderAccount(); renderHome(); renderNotifications(); renderTournaments(); renderAdmin();
   const requested=location.pathname.startsWith('/confirm/')?'home':(location.hash||'#home').slice(1);
   showView(requested,false);
   if(location.pathname.startsWith('/confirm/')) setTimeout(()=>handleConfirmationLink(location.pathname.split('/').pop()),0);
@@ -62,22 +65,67 @@ function renderAccount(){
 }
 
 function renderHome(){
-  const players=rankedPlayers(); const leader=players[0]; const matches=db.matches.filter(m=>m.active).sort((a,b)=>b.createdAt-a.createdAt);
-  const adminMode=currentUser()?.role==='admin';
-  document.querySelector('#simple-home').hidden=adminMode;
-  document.querySelector('#admin-home').hidden=!adminMode;
+  const players=rankedPlayers();
   document.querySelector('#simple-rating').innerHTML=players.map((player,index)=>`<tr><td><span class="rank-number">${index+1}</span></td><td><button class="player-link" data-profile="${player.id}">${publicName(player)}</button></td><td>${player.games}</td><td>${player.wins}</td><td>${player.losses}</td><td><span class="rating-number">${player.rating}</span></td></tr>`).join('')||'<tr><td colspan="6" class="empty">Игроков пока нет</td></tr>';
-  document.querySelector('#summary-players').textContent=players.length;
-  document.querySelector('#summary-matches').textContent=matches.length;
-  document.querySelector('#summary-rating').textContent=leader?.rating ?? ELO_START;
-  document.querySelector('#leader-card').innerHTML=leader?`<span class="leader-label">ЛИДЕР РЕЙТИНГА</span><div class="leader-person"><strong>${publicName(leader)}</strong><span>${leader.wins} побед</span></div><div class="leader-value">${leader.rating}<small>Elo</small></div>`:'<div class="empty">Игроков пока нет</div>';
-  document.querySelector('#home-rating').innerHTML=players.map((p,i)=>`<div class="compact-row"><span class="compact-rank">${i+1}</span><span><button class="player-link" data-profile="${p.id}">${publicName(p)}</button><span class="player-sub">${p.wins} побед</span></span><span class="compact-rating">${p.rating}</span></div>`).join('') || '<div class="empty">Игроков пока нет</div>';
-  document.querySelector('#home-matches').innerHTML=matches.map(match=>matchMiniHtml(match)).join('') || '<div class="empty">Матчей пока нет</div>';
 }
 
-function matchMiniHtml(match){
-  const a=userById(match.playerOne), b=userById(match.playerTwo);
-  return `<div class="recent-match"><div class="recent-date">${formatDate(match.createdAt)}</div><div class="recent-score"><span>${publicName(a)} — ${publicName(b)}</span><strong>${match.scoreOne}:${match.scoreTwo}</strong></div><div class="recent-witness">Результат подтверждён обоими игроками · ±${match._delta||0} Elo</div></div>`;
+function tournamentStatus(tournament){
+  if(tournament.status==='registration'&&Date.now()>=tournament.registrationDeadline) return ['Регистрация завершена','closed'];
+  return ({registration:['Идёт регистрация','registration'],active:['Идёт сейчас','active'],completed:['Завершён','completed'],cancelled:['Отменён','cancelled']})[tournament.status]||[tournament.status,''];
+}
+function tournamentStageLabel(stage,round){
+  if(stage==='upper') return `Верхняя сетка · Раунд ${round}`;
+  if(stage==='lower') return `Нижняя сетка · Раунд ${round}`;
+  if(stage==='final') return 'Финал';
+  return 'Решающая игра';
+}
+function tournamentMatchById(id){
+  for(const tournament of db.tournaments||[]){ const match=tournament.matches.find(item=>item.id===id); if(match) return match; }
+  return null;
+}
+function tournamentMatchAction(match){
+  const me=currentUser();
+  if(!me||match.status!=='pending'||![match.playerOne,match.playerTwo].includes(me.id)) return '';
+  const resultRequest=db.requests.find(item=>item.tournamentMatchId===match.id&&item.status==='pending');
+  if(!resultRequest) return `<button class="button small primary" data-tournament-result="${match.id}">Внести результат</button>`;
+  if(resultRequest.requester===me.id) return `<button class="button small secondary" data-show-qr="${resultRequest.id}">Показать QR</button>`;
+  return `<button class="button small primary" data-confirm-request="${resultRequest.id}">Проверить результат</button>`;
+}
+function bracketMatchHtml(match){
+  const one=userById(match.playerOne),two=userById(match.playerTwo),result=db.matches.find(item=>item.id===match.resultMatchId);
+  if(match.status==='bye') return `<div class="bracket-match bye"><div><strong>${publicName(one)}</strong><span>Проход без игры</span></div></div>`;
+  const scoreOne=result?(result.playerOne===match.playerOne?result.scoreOne:result.scoreTwo):null;
+  const scoreTwo=result?(result.playerOne===match.playerTwo?result.scoreOne:result.scoreTwo):null;
+  return `<div class="bracket-match ${match.status}">
+    <div class="bracket-player ${match.winner===match.playerOne?'winner':''}"><span>${publicName(one)}</span><strong>${scoreOne??'—'}</strong></div>
+    <div class="bracket-player ${match.winner===match.playerTwo?'winner':''}"><span>${publicName(two)}</span><strong>${scoreTwo??'—'}</strong></div>
+    <div class="bracket-action">${tournamentMatchAction(match)}</div>
+  </div>`;
+}
+function renderTournaments(){
+  const list=document.querySelector('#tournament-list'),detail=document.querySelector('#tournament-detail');
+  const order={active:0,registration:1,completed:2,cancelled:3};
+  const tournaments=[...(db.tournaments||[])].sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)||b.startAt-a.startAt);
+  if(!tournaments.length){ list.innerHTML='<div class="panel empty">Турниров пока нет</div>'; detail.innerHTML=''; return; }
+  if(!tournaments.some(item=>item.id===selectedTournamentId)) selectedTournamentId=tournaments[0].id;
+  list.innerHTML=tournaments.map(tournament=>{const [label,state]=tournamentStatus(tournament);return `<button class="tournament-card ${tournament.id===selectedTournamentId?'selected':''}" data-open-tournament="${tournament.id}">
+    <span class="tournament-card-top"><span class="tournament-state ${state}">${label}</span><span>${tournament.participants.length}/${tournament.maxPlayers}</span></span>
+    <strong>${escapeHtml(tournament.name)}</strong><span>${formatDateTime(tournament.startAt)}</span>
+  </button>`}).join('');
+  const tournament=tournaments.find(item=>item.id===selectedTournamentId),me=currentUser();
+  const participant=tournament.participants.find(item=>item.userId===me?.id),registrationOpen=tournament.status==='registration'&&Date.now()<tournament.registrationDeadline&&tournament.participants.length<tournament.maxPlayers;
+  let registrationAction='';
+  if(!me&&tournament.status==='registration') registrationAction='<button class="button primary" data-action="open-auth">Войти для участия</button>';
+  else if(participant&&tournament.status==='registration') registrationAction=`<button class="button secondary" data-leave-tournament="${tournament.id}">Отменить участие</button>`;
+  else if(me?.isPlayer&&registrationOpen) registrationAction=`<button class="button primary" data-join-tournament="${tournament.id}">Участвовать</button>`;
+  const participants=tournament.participants.map(item=>{const user=userById(item.userId);return `<div class="tournament-participant ${item.eliminated?'eliminated':''}"><span class="participant-seed">${item.seed?`#${item.seed}`:'•'}</span><button class="player-link" data-profile="${item.userId}">${publicName(user)}</button>${tournament.status==='active'||tournament.status==='completed'?`<span>${item.eliminated?'Выбыл':`${item.losses} пораж.`}</span>`:''}</div>`}).join('')||'<div class="empty">Пока никто не зарегистрировался</div>';
+  const sequences=[...new Set(tournament.matches.map(item=>item.sequence))];
+  const bracket=sequences.length?`<div class="bracket-board"><div class="bracket-rounds">${sequences.map(sequence=>{const matches=tournament.matches.filter(item=>item.sequence===sequence),first=matches[0];return `<section class="bracket-round"><h3>${tournamentStageLabel(first.stage,first.roundNumber)}</h3>${matches.map(bracketMatchHtml).join('')}</section>`}).join('')}</div></div>`:'<div class="empty bracket-empty">Сетка появится после запуска турнира администратором</div>';
+  detail.innerHTML=`<section class="panel tournament-detail-panel">
+    <div class="tournament-detail-heading"><div><p class="kicker">${escapeHtml(tournamentStatus(tournament)[0].toUpperCase())}</p><h2>${escapeHtml(tournament.name)}</h2><p>${escapeHtml(tournament.description||'Турнир по настольному теннису с двойным выбыванием.')}</p></div>${registrationAction}</div>
+    <div class="tournament-meta"><span><strong>${formatDateTime(tournament.startAt)}</strong>Начало</span><span><strong>${formatDateTime(tournament.registrationDeadline)}</strong>Регистрация до</span><span><strong>${tournament.participants.length} / ${tournament.maxPlayers}</strong>Участники</span>${tournament.championId?`<span><strong>${publicName(userById(tournament.championId))}</strong>Победитель</span>`:''}</div>
+    <div class="tournament-layout"><aside><h3>Участники</h3><div class="participants-list">${participants}</div></aside><section class="tournament-bracket"><h3>Турнирная сетка</h3>${bracket}</section></div>
+  </section>`;
 }
 
 function renderNotifications(){
@@ -94,11 +142,12 @@ function renderNotifications(){
 
 function renderAdmin(){
   const me=currentUser(); if(me?.role!=='admin') return;
-  const pending=db.users.filter(u=>u.status==='pending'), disputes=db.matches.filter(m=>m.active&&m.dispute), active=db.users.filter(u=>u.status==='active'&&u.isPlayer);
-  document.querySelector('#admin-stats').innerHTML=`<div class="admin-stat"><strong>${pending.length}</strong><span>заявок ожидают решения</span></div><div class="admin-stat"><strong>${disputes.length}</strong><span>жалоб требуют проверки</span></div><div class="admin-stat"><strong>${active.length}</strong><span>активных игроков</span></div>`;
+  const pending=db.users.filter(u=>u.status==='pending'), disputes=db.matches.filter(m=>m.active&&m.dispute), active=db.users.filter(u=>u.status==='active'&&u.isPlayer),running=(db.tournaments||[]).filter(t=>t.status==='active'||t.status==='registration');
+  document.querySelector('#admin-stats').innerHTML=`<div class="admin-stat"><strong>${pending.length}</strong><span>заявок ожидают решения</span></div><div class="admin-stat"><strong>${disputes.length}</strong><span>жалоб требуют проверки</span></div><div class="admin-stat"><strong>${active.length}</strong><span>активных игроков</span></div><div class="admin-stat"><strong>${running.length}</strong><span>открытых турниров</span></div>`;
   document.querySelector('#pending-users').innerHTML=pending.map(u=>`<div class="request-row"><div><div class="request-name">${escapeHtml(u.firstName)} ${escapeHtml(u.lastName)}</div><div class="request-meta">${escapeHtml(u.className)} класс · @${escapeHtml(u.login)}</div></div><div class="row-actions"><button class="button small primary" data-approve="${u.id}">Подтвердить</button><button class="button small danger" data-reject="${u.id}">Отклонить</button></div></div>`).join('')||'<div class="empty">Новых заявок нет</div>';
   document.querySelector('#disputes').innerHTML=disputes.map(m=>{const a=userById(m.playerOne),b=userById(m.playerTwo),reporter=userById(m.dispute.userId);return `<div class="request-row"><div><div class="request-name">${publicName(a)} ${m.scoreOne}:${m.scoreTwo} ${publicName(b)}</div><div class="request-meta">${publicName(reporter)}: ${escapeHtml(m.dispute.reason)}</div></div><div class="row-actions"><button class="button small secondary" data-resolve="${m.id}">Оставить</button><button class="button small danger" data-cancel-match="${m.id}">Отменить матч</button></div></div>`}).join('')||'<div class="empty">Жалоб нет</div>';
   document.querySelector('#users-body').innerHTML=db.users.map(u=>`<tr><td>${escapeHtml(u.firstName)} ${escapeHtml(u.lastName)}${u.className?` · ${escapeHtml(u.className)}`:''}</td><td>${u.login?`@${escapeHtml(u.login)}`:'ЛК Силаэдра'}</td><td><span class="state ${u.status}">${statusLabel(u.status)}</span></td><td>${u.role==='admin'?'Администратор':u.role==='teacher'?'Учитель':'Ученик'}</td><td>${u.role!=='admin'&&u.status!=='pending'?`<button class="button small secondary" data-toggle-user="${u.id}">${u.status==='active'?'Сделать неактивным':'Активировать'}</button>`:''}</td></tr>`).join('');
+  document.querySelector('#admin-tournaments-list').innerHTML=(db.tournaments||[]).map(t=>{const [label,state]=tournamentStatus(t);return `<div class="admin-tournament-row"><div><div class="request-name">${escapeHtml(t.name)}</div><div class="request-meta">${label} · ${t.participants.length}/${t.maxPlayers} участников · ${formatDateTime(t.startAt)}</div></div><div class="row-actions"><button class="button small secondary" data-open-tournament="${t.id}" data-go-tournaments>Открыть</button>${t.status==='registration'?`<button class="button small primary" data-start-tournament="${t.id}">Сформировать сетку</button><button class="button small danger" data-cancel-tournament="${t.id}">Отменить</button>`:''}</div></div>`}).join('')||'<div class="empty">Турниров пока нет</div>';
 }
 function statusLabel(status){ return ({active:'Активен',pending:'Ожидает',inactive:'Неактивен',rejected:'Отклонён'})[status]||status; }
 
@@ -119,16 +168,27 @@ function openAuth(){
   message.textContent=db.oidcEnabled?'':'Школьный вход будет доступен после настройки OIDC-клиента.';
   document.querySelector('#auth-dialog').showModal();
 }
-function openMatchForm(){
+function openMatchForm(tournamentMatch=null){
   const me=currentUser();
   if(!me){ openAuth(); return; }
   if(me.status!=='active'){ toast('Сначала дождитесь подтверждения администратора'); return; }
   if(!me.isPlayer){ toast('Администратор без профиля игрока не может подать результат'); return; }
   const players=rankedPlayers().filter(p=>p.id!==me.id); const form=document.querySelector('#match-form');
-  opponentOptions=players; form.reset(); form.opponent.value=''; form.scoreRequester.value=11; form.scoreOpponent.value=7;
+  opponentOptions=players; form.reset(); form.opponent.value=''; form.tournamentMatchId.value=tournamentMatch?.id||''; form.scoreRequester.value=11; form.scoreOpponent.value=7;
   document.querySelector('#opponent-search').value=''; document.querySelector('#student-picker').classList.remove('selected');
   document.querySelector('#student-suggestions').hidden=true; document.querySelector('#opponent-search').setAttribute('aria-expanded','false');
   document.querySelector('#requester-name').textContent=displayName(me);
+  const search=document.querySelector('#opponent-search');
+  search.readOnly=Boolean(tournamentMatch);
+  document.querySelector('#match-kicker').textContent=tournamentMatch?'ТУРНИРНЫЙ МАТЧ':'НОВАЯ ЗАЯВКА';
+  document.querySelector('#match-title').textContent=tournamentMatch?'Внести результат турнира':'Подать результат матча';
+  document.querySelector('#match-description').textContent=tournamentMatch?'Соперник уже выбран сеткой. После подтверждения система автоматически распределит игроков по следующему раунду.':'Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.';
+  if(tournamentMatch){
+    const opponentId=tournamentMatch.playerOne===me.id?tournamentMatch.playerTwo:tournamentMatch.playerOne;
+    const opponent=players.find(player=>player.id===opponentId);
+    if(!opponent){ toast('Соперник недоступен'); return; }
+    opponentOptions=[opponent]; selectOpponent(opponent.id);
+  }
   form.querySelector('[data-form-message]').textContent=''; document.querySelector('#match-dialog').showModal();
 }
 
@@ -184,12 +244,12 @@ async function handleConfirmationLink(token){
 
 async function acceptRequest(request){
   const me=currentUser(); if(!request||request.status!=='pending'||me?.id!==request.opponent) return;
-  try { await mutate(`/api/requests/${request.id}/accept`,{}); document.querySelector('#confirm-dialog').close(); history.replaceState(null,'/','#home'); toast('Результат подтверждён, рейтинг обновлён'); }
+  try { await mutate(`/api/requests/${request.id}/accept`,{}); document.querySelector('#confirm-dialog').close(); const target=request.tournamentMatchId?'tournaments':'home';history.replaceState(null,'',`#${target}`);showView(target,false);toast(request.tournamentMatchId?'Результат подтверждён, сетка обновлена':'Результат подтверждён, рейтинг обновлён'); }
   catch(error){ toast(error.message); }
 }
 async function rejectRequest(request){
   const me=currentUser(); if(!request||request.status!=='pending'||me?.id!==request.opponent) return;
-  try { await mutate(`/api/requests/${request.id}/reject`,{}); if(document.querySelector('#confirm-dialog').open) document.querySelector('#confirm-dialog').close(); history.replaceState(null,'/','#home'); toast('Заявка отклонена'); }
+  try { await mutate(`/api/requests/${request.id}/reject`,{}); if(document.querySelector('#confirm-dialog').open) document.querySelector('#confirm-dialog').close(); const target=request.tournamentMatchId?'tournaments':'home';history.replaceState(null,'',`#${target}`);showView(target,false);toast('Заявка отклонена'); }
   catch(error){ toast(error.message); }
 }
 function validateAcceptedPair(playerOne,playerTwo){
@@ -213,6 +273,13 @@ document.addEventListener('click',async event=>{
   if(event.target.closest('[data-action="open-auth"]')) openAuth();
   if(event.target.closest('[data-action="logout"]')){ try{if(db.oidcSession){const result=await api('/auth/silaeder/logout',{method:'POST',body:{}});location.href=result.redirect}else{await mutate('/api/logout',{});toast('Вы вышли из аккаунта')}}catch(error){toast(error.message)} }
   if(event.target.closest('[data-action="add-match"]')) openMatchForm();
+  const createTournament=event.target.closest('[data-action="create-tournament"]'); if(createTournament){ const form=document.querySelector('#tournament-form'),now=Date.now();form.reset();form.maxPlayers.value=8;form.registrationDeadline.value=localDateTimeValue(now+24*60*60*1000);form.startAt.value=localDateTimeValue(now+48*60*60*1000);form.querySelector('[data-form-message]').textContent='';document.querySelector('#tournament-dialog').showModal(); }
+  const openTournament=event.target.closest('[data-open-tournament]'); if(openTournament){ selectedTournamentId=openTournament.dataset.openTournament;renderTournaments();if(openTournament.hasAttribute('data-go-tournaments'))showView('tournaments'); }
+  const joinTournament=event.target.closest('[data-join-tournament]'); if(joinTournament){ try{await mutate(`/api/tournaments/${joinTournament.dataset.joinTournament}/join`,{});toast('Вы зарегистрированы на турнир')}catch(error){toast(error.message)} }
+  const leaveTournament=event.target.closest('[data-leave-tournament]'); if(leaveTournament){ try{await mutate(`/api/tournaments/${leaveTournament.dataset.leaveTournament}/leave`,{});toast('Участие отменено')}catch(error){toast(error.message)} }
+  const startTournament=event.target.closest('[data-start-tournament]'); if(startTournament&&confirm('Сформировать сетку и закрыть регистрацию?')){ try{await mutate(`/api/admin/tournaments/${startTournament.dataset.startTournament}/start`,{});selectedTournamentId=startTournament.dataset.startTournament;toast('Участники автоматически распределены по сетке')}catch(error){toast(error.message)} }
+  const cancelTournament=event.target.closest('[data-cancel-tournament]'); if(cancelTournament&&confirm('Отменить этот турнир?')){ try{await mutate(`/api/admin/tournaments/${cancelTournament.dataset.cancelTournament}/cancel`,{});toast('Турнир отменён')}catch(error){toast(error.message)} }
+  const tournamentResult=event.target.closest('[data-tournament-result]'); if(tournamentResult) openMatchForm(tournamentMatchById(tournamentResult.dataset.tournamentResult));
   const profile=event.target.closest('[data-profile]'); if(profile) openProfile(profile.dataset.profile);
   const close=event.target.closest('[data-close]'); if(close) close.closest('dialog').close();
   const oidcButton=event.target.closest('#oidc-login-button'); if(oidcButton&&!db.oidcEnabled){event.preventDefault();toast('OIDC-клиент ещё не настроен')}
@@ -248,12 +315,20 @@ document.querySelector('#match-form').addEventListener('submit',async event=>{
   if(!opponent){ message.textContent='Выберите соперника из предложенного списка.'; return; }
   if(opponent===me.id){ message.textContent='Выберите другого игрока.'; return; }
   if(!validScore(s1,s2)){ message.textContent='Некорректный счёт. Победа — от 11 очков с преимуществом в два.'; return; }
-  try { const created=await api('/api/requests',{method:'POST',body:{opponent,scoreRequester:s1,scoreOpponent:s2}}); await refreshState(); const result=requestById(created.id); document.querySelector('#match-dialog').close();render();showQr(result);toast('Заявка создана'); }
+  try { const created=await api('/api/requests',{method:'POST',body:{opponent,scoreRequester:s1,scoreOpponent:s2,tournamentMatchId:form.tournamentMatchId.value||null}}); await refreshState(); const result=requestById(created.id); document.querySelector('#match-dialog').close();render();showQr(result);toast('Заявка создана'); }
   catch(error){ message.textContent=error.message; }
 });
 
-document.querySelector('#opponent-search').addEventListener('focus',event=>renderStudentSuggestions(event.currentTarget.value.includes('·')?'':event.currentTarget.value));
+document.querySelector('#tournament-form').addEventListener('submit',async event=>{
+  event.preventDefault();const form=event.currentTarget,message=form.querySelector('[data-form-message]');
+  const registrationDeadline=new Date(form.registrationDeadline.value).getTime(),startAt=new Date(form.startAt.value).getTime();
+  try{const created=await api('/api/admin/tournaments',{method:'POST',body:{name:form.name.value.trim(),description:form.description.value.trim(),registrationDeadline,startAt,maxPlayers:Number(form.maxPlayers.value)}});await refreshState();selectedTournamentId=created.id;form.reset();document.querySelector('#tournament-dialog').close();render();showView('tournaments');toast('Турнир создан, регистрация открыта')}
+  catch(error){message.textContent=error.message}
+});
+
+document.querySelector('#opponent-search').addEventListener('focus',event=>{if(!event.currentTarget.readOnly)renderStudentSuggestions(event.currentTarget.value.includes('·')?'':event.currentTarget.value)});
 document.querySelector('#opponent-search').addEventListener('input',event=>{
+  if(event.currentTarget.readOnly)return;
   const form=document.querySelector('#match-form'); form.opponent.value=''; document.querySelector('#student-picker').classList.remove('selected'); renderStudentSuggestions(event.currentTarget.value);
 });
 document.querySelector('#opponent-search').addEventListener('keydown',event=>{

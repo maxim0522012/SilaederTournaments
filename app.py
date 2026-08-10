@@ -163,11 +163,50 @@ def init_db():
           id TEXT PRIMARY KEY, user_id TEXT NOT NULL, id_token TEXT,
           created_at INTEGER NOT NULL, FOREIGN KEY(user_id) REFERENCES users(id)
         );
+        CREATE TABLE IF NOT EXISTS tournaments (
+          id TEXT PRIMARY KEY, name TEXT NOT NULL, description TEXT NOT NULL DEFAULT '',
+          registration_deadline INTEGER NOT NULL, start_at INTEGER NOT NULL,
+          max_players INTEGER NOT NULL, status TEXT NOT NULL DEFAULT 'registration',
+          champion_id TEXT, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+          completed_at INTEGER,
+          FOREIGN KEY(champion_id) REFERENCES users(id),
+          FOREIGN KEY(created_by) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS tournament_participants (
+          tournament_id TEXT NOT NULL, user_id TEXT NOT NULL, seed INTEGER,
+          losses INTEGER NOT NULL DEFAULT 0, eliminated INTEGER NOT NULL DEFAULT 0,
+          joined_at INTEGER NOT NULL,
+          PRIMARY KEY(tournament_id, user_id),
+          FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
+          FOREIGN KEY(user_id) REFERENCES users(id)
+        );
+        CREATE TABLE IF NOT EXISTS tournament_matches (
+          id TEXT PRIMARY KEY, tournament_id TEXT NOT NULL, sequence INTEGER NOT NULL,
+          stage TEXT NOT NULL, round_number INTEGER NOT NULL, position INTEGER NOT NULL,
+          player_one TEXT NOT NULL, player_two TEXT, winner TEXT, loser TEXT,
+          status TEXT NOT NULL DEFAULT 'pending', result_match_id TEXT,
+          created_at INTEGER NOT NULL, completed_at INTEGER,
+          FOREIGN KEY(tournament_id) REFERENCES tournaments(id) ON DELETE CASCADE,
+          FOREIGN KEY(player_one) REFERENCES users(id), FOREIGN KEY(player_two) REFERENCES users(id),
+          FOREIGN KEY(winner) REFERENCES users(id), FOREIGN KEY(loser) REFERENCES users(id),
+          FOREIGN KEY(result_match_id) REFERENCES matches(id)
+        );
+        CREATE INDEX IF NOT EXISTS idx_tournament_participants_tournament
+          ON tournament_participants(tournament_id, eliminated, losses);
+        CREATE INDEX IF NOT EXISTS idx_tournament_matches_tournament_sequence
+          ON tournament_matches(tournament_id, sequence, position);
         """)
         columns = {row["name"] for row in connection.execute("PRAGMA table_info(users)")}
         if "email" not in columns:
             connection.execute("ALTER TABLE users ADD COLUMN email TEXT")
+        request_columns = {row["name"] for row in connection.execute("PRAGMA table_info(requests)")}
+        if "tournament_match_id" not in request_columns:
+            connection.execute("ALTER TABLE requests ADD COLUMN tournament_match_id TEXT")
+        match_columns = {row["name"] for row in connection.execute("PRAGMA table_info(matches)")}
+        if "tournament_match_id" not in match_columns:
+            connection.execute("ALTER TABLE matches ADD COLUMN tournament_match_id TEXT")
         connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_users_email ON users(lower(email)) WHERE email IS NOT NULL AND email != ''")
+        connection.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_requests_tournament_pending ON requests(tournament_match_id) WHERE tournament_match_id IS NOT NULL AND status='pending'")
         if connection.execute("SELECT COUNT(*) FROM users").fetchone()[0] == 0:
             if len(ADMIN_PASSWORD) < 12:
                 raise RuntimeError("Для первого запуска задайте ADMIN_PASSWORD длиной не менее 12 символов.")
@@ -200,6 +239,7 @@ def init_db():
         if admin and len(ADMIN_PASSWORD) >= 12 and not check_password_hash(admin["password_hash"], ADMIN_PASSWORD):
             connection.execute("UPDATE users SET password_hash=? WHERE id=?", (generate_password_hash(ADMIN_PASSWORD), admin["id"]))
         connection.execute("DELETE FROM oidc_sessions")
+        connection.execute("PRAGMA optimize")
 
 
 def user_row(user_id):
@@ -242,6 +282,137 @@ def serialize_user(row, viewer):
                     email=row["email"] if "email" in row.keys() else "",
                     role=row["role"], createdAt=row["created_at"])
     return data
+
+
+def calculate_server_ratings(connection):
+    ratings = {row["id"]: ELO_START for row in connection.execute("SELECT id FROM users WHERE is_player=1")}
+    rows = connection.execute("SELECT player_one,player_two,score_one,score_two FROM matches WHERE active=1 ORDER BY created_at").fetchall()
+    for match in rows:
+        if match["player_one"] not in ratings or match["player_two"] not in ratings:
+            continue
+        rating_one, rating_two = ratings[match["player_one"]], ratings[match["player_two"]]
+        expected_one = 1 / (1 + 10 ** ((rating_two - rating_one) / 400))
+        player_one_won = match["score_one"] > match["score_two"]
+        delta = round(ELO_K * ((1 if player_one_won else 0) - expected_one))
+        ratings[match["player_one"]] += delta
+        ratings[match["player_two"]] -= delta
+    return ratings
+
+
+def create_tournament_round(connection, tournament_id, stage, players):
+    ordered = sorted(players, key=lambda row: (row["seed"] or 10_000, row["joined_at"]))
+    sequence = connection.execute(
+        "SELECT COALESCE(MAX(sequence),0)+1 FROM tournament_matches WHERE tournament_id=?", (tournament_id,)
+    ).fetchone()[0]
+    round_number = connection.execute(
+        "SELECT COALESCE(MAX(round_number),0)+1 FROM tournament_matches WHERE tournament_id=? AND stage=?",
+        (tournament_id, stage),
+    ).fetchone()[0]
+    created = now_ms()
+    position = 1
+    while len(ordered) > 1:
+        player_one = ordered.pop(0)
+        player_two = ordered.pop(-1)
+        connection.execute(
+            """INSERT INTO tournament_matches(
+                 id,tournament_id,sequence,stage,round_number,position,player_one,player_two,
+                 winner,loser,status,result_match_id,created_at,completed_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (f"tm-{secrets.token_hex(8)}", tournament_id, sequence, stage, round_number, position,
+             player_one["user_id"], player_two["user_id"], None, None, "pending", None, created, None),
+        )
+        position += 1
+    if ordered:
+        player = ordered[0]
+        connection.execute(
+            """INSERT INTO tournament_matches(
+                 id,tournament_id,sequence,stage,round_number,position,player_one,player_two,
+                 winner,loser,status,result_match_id,created_at,completed_at
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (f"tm-{secrets.token_hex(8)}", tournament_id, sequence, stage, round_number, position,
+             player["user_id"], None, player["user_id"], None, "bye", None, created, created),
+        )
+
+
+def advance_tournament(connection, tournament_id):
+    tournament = connection.execute("SELECT * FROM tournaments WHERE id=?", (tournament_id,)).fetchone()
+    if not tournament or tournament["status"] != "active":
+        return
+    if connection.execute(
+        "SELECT 1 FROM tournament_matches WHERE tournament_id=? AND status='pending' LIMIT 1", (tournament_id,)
+    ).fetchone():
+        return
+    active_players = connection.execute(
+        """SELECT * FROM tournament_participants
+           WHERE tournament_id=? AND eliminated=0 ORDER BY seed,joined_at""", (tournament_id,)
+    ).fetchall()
+    if len(active_players) == 1:
+        connection.execute(
+            "UPDATE tournaments SET status='completed',champion_id=?,completed_at=? WHERE id=?",
+            (active_players[0]["user_id"], now_ms(), tournament_id),
+        )
+        return
+    if not active_players:
+        connection.execute("UPDATE tournaments SET status='cancelled',completed_at=? WHERE id=?", (now_ms(), tournament_id))
+        return
+
+    upper = [player for player in active_players if player["losses"] == 0]
+    lower = [player for player in active_players if player["losses"] == 1]
+    last = connection.execute(
+        "SELECT stage FROM tournament_matches WHERE tournament_id=? ORDER BY sequence DESC LIMIT 1", (tournament_id,)
+    ).fetchone()
+    last_stage = last["stage"] if last else None
+
+    if upper and lower:
+        if len(upper) == 1 and len(lower) == 1:
+            stage, players = "final", [upper[0], lower[0]]
+        elif len(upper) > 1 and len(lower) > 1:
+            stage = "lower" if last_stage == "upper" else "upper"
+            players = lower if stage == "lower" else upper
+        elif len(upper) > 1:
+            stage, players = "upper", upper
+        else:
+            stage, players = "lower", lower
+    elif len(upper) > 1:
+        stage, players = "upper", upper
+    elif len(lower) > 1:
+        stage, players = ("reset" if last_stage == "final" else "lower"), lower
+    else:
+        winner = (upper or lower)[0]
+        connection.execute(
+            "UPDATE tournaments SET status='completed',champion_id=?,completed_at=? WHERE id=?",
+            (winner["user_id"], now_ms(), tournament_id),
+        )
+        return
+    create_tournament_round(connection, tournament_id, stage, players)
+
+
+def serialize_tournaments(connection):
+    tournaments = []
+    for row in connection.execute("SELECT * FROM tournaments ORDER BY start_at DESC,created_at DESC").fetchall():
+        participants = connection.execute(
+            "SELECT * FROM tournament_participants WHERE tournament_id=? ORDER BY COALESCE(seed,10000),joined_at", (row["id"],)
+        ).fetchall()
+        bracket = connection.execute(
+            "SELECT * FROM tournament_matches WHERE tournament_id=? ORDER BY sequence,position", (row["id"],)
+        ).fetchall()
+        tournaments.append({
+            "id": row["id"], "name": row["name"], "description": row["description"],
+            "registrationDeadline": row["registration_deadline"], "startAt": row["start_at"],
+            "maxPlayers": row["max_players"], "status": row["status"],
+            "championId": row["champion_id"], "createdAt": row["created_at"],
+            "participants": [{"userId": item["user_id"], "seed": item["seed"], "losses": item["losses"],
+                              "eliminated": bool(item["eliminated"]), "joinedAt": item["joined_at"]}
+                             for item in participants],
+            "matches": [{"id": item["id"], "sequence": item["sequence"], "stage": item["stage"],
+                         "roundNumber": item["round_number"], "position": item["position"],
+                         "playerOne": item["player_one"], "playerTwo": item["player_two"],
+                         "winner": item["winner"], "loser": item["loser"], "status": item["status"],
+                         "resultMatchId": item["result_match_id"], "createdAt": item["created_at"],
+                         "completedAt": item["completed_at"]}
+                        for item in bracket],
+        })
+    return tournaments
 
 
 @app.get("/")
@@ -316,6 +487,7 @@ def state():
                   (status='active' AND is_player=1) OR id=? OR id IN (
                     SELECT player_one FROM matches WHERE active=1
                     UNION SELECT player_two FROM matches WHERE active=1
+                    UNION SELECT user_id FROM tournament_participants
                   )
                 ORDER BY created_at
             """, (viewer_id,)).fetchall()
@@ -329,11 +501,13 @@ def state():
             else:
                 rows = connection.execute("SELECT * FROM requests WHERE requester=? OR opponent=? ORDER BY created_at", (viewer["id"], viewer["id"])).fetchall()
             requests_rows = [dict(row) for row in rows]
+        tournaments = serialize_tournaments(connection)
     matches_json = []
     for m in matches:
         item = {"id":m["id"],"playerOne":m["player_one"],"playerTwo":m["player_two"],
                 "scoreOne":m["score_one"],"scoreTwo":m["score_two"],
-                "createdAt":m["created_at"],"active":bool(m["active"])}
+                "createdAt":m["created_at"],"active":bool(m["active"]),
+                "tournamentMatchId":m.get("tournament_match_id") if isinstance(m, dict) else m["tournament_match_id"]}
         if viewer and viewer["role"] == "admin":
             item["confirmedBy"] = m["confirmed_by"]
         if m["dispute_user"] and viewer and (viewer["role"] == "admin" or viewer["id"] in {m["player_one"], m["player_two"]}):
@@ -342,8 +516,9 @@ def state():
     requests_json = [{"id":r["id"],"token":r["token"] if viewer and viewer["id"] == r["requester"] else "",
                       "requester":r["requester"],"opponent":r["opponent"],
                       "scoreRequester":r["score_requester"],"scoreOpponent":r["score_opponent"],
-                      "status":r["status"],"notified":bool(r["notified"]),"createdAt":r["created_at"]} for r in requests_rows]
-    return jsonify(users=users, matches=matches_json, requests=requests_json,
+                      "status":r["status"],"notified":bool(r["notified"]),"createdAt":r["created_at"],
+                      "tournamentMatchId":r.get("tournament_match_id")} for r in requests_rows]
+    return jsonify(users=users, matches=matches_json, requests=requests_json, tournaments=tournaments,
                    currentUserId=viewer["id"] if viewer else None,
                    oidcEnabled=OIDC_ENABLED, oidcSession=bool(session.get("oidc_login")),
                    csrfToken=csrf_token, authMessage=session.pop("auth_message", None))
@@ -581,6 +756,105 @@ def search_users(viewer):
     return jsonify(users=[serialize_user(row,None) for row in rows])
 
 
+@app.post("/api/admin/tournaments")
+@require_admin
+def create_tournament(admin):
+    data = request.get_json(silent=True) or {}
+    try:
+        name = clean_text(data.get("name"), "Название", 100)
+        description = clean_text(data.get("description"), "Описание", 600, required=False)
+        registration_deadline = int(data.get("registrationDeadline"))
+        start_at = int(data.get("startAt"))
+        max_players = int(data.get("maxPlayers"))
+    except (TypeError, ValueError) as error:
+        message = str(error) if isinstance(error, ValueError) and str(error).startswith("Поле") else "Проверьте даты и количество участников."
+        return jsonify(error=message), 400
+    if max_players < 2 or max_players > 32:
+        return jsonify(error="Количество участников должно быть от 2 до 32."), 400
+    if registration_deadline <= now_ms() or start_at <= registration_deadline:
+        return jsonify(error="Регистрация должна завершаться в будущем и раньше начала турнира."), 400
+    tournament_id = f"t-{secrets.token_hex(8)}"
+    with db() as connection:
+        connection.execute(
+            """INSERT INTO tournaments(
+                 id,name,description,registration_deadline,start_at,max_players,status,created_by,created_at
+               ) VALUES(?,?,?,?,?,?, 'registration',?,?)""",
+            (tournament_id, name, description, registration_deadline, start_at, max_players, admin["id"], now_ms()),
+        )
+    return jsonify(id=tournament_id)
+
+
+@app.post("/api/tournaments/<tournament_id>/<action>")
+@require_user
+def tournament_registration(user, tournament_id, action):
+    if action not in {"join", "leave"}:
+        return jsonify(error="Неизвестное действие."), 400
+    if not user["is_player"]:
+        return jsonify(error="Для участия нужен профиль игрока."), 403
+    with db() as connection:
+        tournament = connection.execute("SELECT * FROM tournaments WHERE id=?", (tournament_id,)).fetchone()
+        if not tournament:
+            return jsonify(error="Турнир не найден."), 404
+        if tournament["status"] != "registration":
+            return jsonify(error="Регистрация на этот турнир закрыта."), 409
+        if action == "join":
+            if now_ms() >= tournament["registration_deadline"]:
+                return jsonify(error="Срок регистрации уже закончился."), 409
+            count = connection.execute(
+                "SELECT COUNT(*) FROM tournament_participants WHERE tournament_id=?", (tournament_id,)
+            ).fetchone()[0]
+            if count >= tournament["max_players"]:
+                return jsonify(error="Все места на турнир уже заняты."), 409
+            try:
+                connection.execute(
+                    "INSERT INTO tournament_participants(tournament_id,user_id,joined_at) VALUES(?,?,?)",
+                    (tournament_id, user["id"], now_ms()),
+                )
+            except sqlite3.IntegrityError:
+                return jsonify(error="Вы уже зарегистрированы на этот турнир."), 409
+        else:
+            result = connection.execute(
+                "DELETE FROM tournament_participants WHERE tournament_id=? AND user_id=?", (tournament_id, user["id"])
+            )
+            if not result.rowcount:
+                return jsonify(error="Вы не зарегистрированы на этот турнир."), 404
+    return jsonify(ok=True)
+
+
+@app.post("/api/admin/tournaments/<tournament_id>/<action>")
+@require_admin
+def admin_tournament(admin, tournament_id, action):
+    if action not in {"start", "cancel"}:
+        return jsonify(error="Неизвестное действие."), 400
+    with db() as connection:
+        tournament = connection.execute("SELECT * FROM tournaments WHERE id=?", (tournament_id,)).fetchone()
+        if not tournament:
+            return jsonify(error="Турнир не найден."), 404
+        if tournament["status"] != "registration":
+            return jsonify(error="Это действие уже недоступно для турнира."), 409
+        if action == "cancel":
+            connection.execute(
+                "UPDATE tournaments SET status='cancelled',completed_at=? WHERE id=?", (now_ms(), tournament_id)
+            )
+            return jsonify(ok=True)
+
+        participants = connection.execute(
+            "SELECT * FROM tournament_participants WHERE tournament_id=? ORDER BY joined_at", (tournament_id,)
+        ).fetchall()
+        if len(participants) < 2:
+            return jsonify(error="Для запуска нужны хотя бы два участника."), 409
+        ratings = calculate_server_ratings(connection)
+        ordered = sorted(participants, key=lambda row: (-ratings.get(row["user_id"], ELO_START), row["joined_at"]))
+        for seed, participant in enumerate(ordered, 1):
+            connection.execute(
+                "UPDATE tournament_participants SET seed=?,losses=0,eliminated=0 WHERE tournament_id=? AND user_id=?",
+                (seed, tournament_id, participant["user_id"]),
+            )
+        connection.execute("UPDATE tournaments SET status='active' WHERE id=?", (tournament_id,))
+        advance_tournament(connection, tournament_id)
+    return jsonify(ok=True)
+
+
 def same_pair_today(connection,p1,p2,include_requests=True):
     start=time.mktime(time.localtime()[:3]+(0,0,0,0,0,-1))*1000
     if connection.execute("SELECT 1 FROM matches WHERE active=1 AND created_at>=? AND ((player_one=? AND player_two=?) OR (player_one=? AND player_two=?))",(start,p1,p2,p2,p1)).fetchone():
@@ -591,18 +865,45 @@ def same_pair_today(connection,p1,p2,include_requests=True):
 @app.post("/api/requests")
 @require_user
 def create_request(user):
-    data=request.get_json() or {}; opponent=data.get("opponent")
+    data=request.get_json(silent=True) or {}; opponent=data.get("opponent")
+    tournament_match_id=data.get("tournamentMatchId") or None
     if not isinstance(opponent, str) or len(opponent) > 80:
         return jsonify(error="Некорректный соперник."), 400
+    if tournament_match_id is not None and (not isinstance(tournament_match_id, str) or len(tournament_match_id) > 80):
+        return jsonify(error="Некорректный турнирный матч."), 400
     try: s1,s2=int(data.get("scoreRequester")),int(data.get("scoreOpponent"))
     except (TypeError,ValueError): return jsonify(error="Некорректный счёт."),400
     if opponent==user["id"] or not valid_score(s1,s2): return jsonify(error="Проверьте соперника и счёт матча."),400
+    if not user["is_player"]:
+        return jsonify(error="Для подачи результата нужен профиль игрока."),403
     with db() as connection:
+        if tournament_match_id:
+            tournament_match=connection.execute(
+                """SELECT tm.*,t.status AS tournament_status FROM tournament_matches tm
+                   JOIN tournaments t ON t.id=tm.tournament_id WHERE tm.id=?""", (tournament_match_id,)
+            ).fetchone()
+            if not tournament_match or tournament_match["status"]!="pending" or tournament_match["tournament_status"]!="active":
+                return jsonify(error="Турнирный матч не найден или уже завершён."),404
+            if user["id"] not in {tournament_match["player_one"],tournament_match["player_two"]}:
+                return jsonify(error="Подать результат могут только участники этого матча."),403
+            expected_opponent = tournament_match["player_two"] if user["id"] == tournament_match["player_one"] else tournament_match["player_one"]
+            if opponent != expected_opponent:
+                return jsonify(error="Для турнирного матча выбран неверный соперник."),400
+            if connection.execute(
+                "SELECT 1 FROM requests WHERE tournament_match_id=? AND status='pending'", (tournament_match_id,)
+            ).fetchone():
+                return jsonify(error="Для этого турнирного матча уже подан результат."),409
         target=connection.execute("SELECT * FROM users WHERE id=? AND status='active' AND is_player=1",(opponent,)).fetchone()
         if not target: return jsonify(error="Игрок не найден."),404
-        if same_pair_today(connection,user["id"],opponent): return jsonify(error="Для этой пары уже есть матч или заявка сегодня."),409
+        if not tournament_match_id and same_pair_today(connection,user["id"],opponent):
+            return jsonify(error="Для этой пары уже есть матч или заявка сегодня."),409
         rid=f"r-{secrets.token_hex(8)}"; token=secrets.token_urlsafe(24)
-        connection.execute("INSERT INTO requests(id,token,requester,opponent,score_requester,score_opponent,created_at) VALUES(?,?,?,?,?,?,?)",(rid,token,user["id"],opponent,s1,s2,now_ms()))
+        connection.execute(
+            """INSERT INTO requests(
+                 id,token,requester,opponent,score_requester,score_opponent,created_at,tournament_match_id
+               ) VALUES(?,?,?,?,?,?,?,?)""",
+            (rid,token,user["id"],opponent,s1,s2,now_ms(),tournament_match_id),
+        )
     return jsonify(id=rid,token=token)
 
 
@@ -637,8 +938,39 @@ def resolve_request(user,rid,action):
         row=connection.execute("SELECT * FROM requests WHERE id=? AND opponent=? AND status='pending'",(rid,user["id"])).fetchone()
         if not row: return jsonify(error="Заявка не найдена или уже обработана."),404
         if action=="accept":
-            if same_pair_today(connection,row["requester"],row["opponent"],False): return jsonify(error="Эта пара уже сыграла сегодня."),409
-            connection.execute("INSERT INTO matches VALUES(?,?,?,?,?,?,?,?,?,?)",(f"m-{secrets.token_hex(8)}",row["requester"],row["opponent"],row["score_requester"],row["score_opponent"],user["id"],now_ms(),1,None,None))
+            if not row["tournament_match_id"] and same_pair_today(connection,row["requester"],row["opponent"],False):
+                return jsonify(error="Эта пара уже сыграла сегодня."),409
+            match_id=f"m-{secrets.token_hex(8)}"
+            if row["tournament_match_id"]:
+                tournament_match=connection.execute(
+                    """SELECT tm.*,t.status AS tournament_status FROM tournament_matches tm
+                       JOIN tournaments t ON t.id=tm.tournament_id WHERE tm.id=?""", (row["tournament_match_id"],)
+                ).fetchone()
+                if not tournament_match or tournament_match["status"]!="pending" or tournament_match["tournament_status"]!="active":
+                    return jsonify(error="Турнирный матч уже закрыт."),409
+            connection.execute(
+                """INSERT INTO matches(
+                     id,player_one,player_two,score_one,score_two,confirmed_by,created_at,active,
+                     dispute_user,dispute_reason,tournament_match_id
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                (match_id,row["requester"],row["opponent"],row["score_requester"],row["score_opponent"],
+                 user["id"],now_ms(),1,None,None,row["tournament_match_id"]),
+            )
+            if row["tournament_match_id"]:
+                winner = row["requester"] if row["score_requester"] > row["score_opponent"] else row["opponent"]
+                loser = row["opponent"] if winner == row["requester"] else row["requester"]
+                connection.execute(
+                    """UPDATE tournament_matches SET winner=?,loser=?,status='completed',result_match_id=?,completed_at=?
+                       WHERE id=? AND status='pending'""",
+                    (winner,loser,match_id,now_ms(),row["tournament_match_id"]),
+                )
+                connection.execute(
+                    """UPDATE tournament_participants
+                       SET losses=losses+1,eliminated=CASE WHEN losses+1>=2 THEN 1 ELSE 0 END
+                       WHERE tournament_id=? AND user_id=?""",
+                    (tournament_match["tournament_id"],loser),
+                )
+                advance_tournament(connection,tournament_match["tournament_id"])
         connection.execute("UPDATE requests SET status=?,resolved_at=? WHERE id=?",("accepted" if action=="accept" else "rejected",now_ms(),rid))
     return jsonify(ok=True)
 
@@ -680,7 +1012,11 @@ def dispute_match(user,mid):
 @require_admin
 def admin_match(admin,mid,action):
     with db() as connection:
-        if action=="cancel": connection.execute("UPDATE matches SET active=0 WHERE id=?",(mid,))
+        if action=="cancel":
+            match = connection.execute("SELECT tournament_match_id FROM matches WHERE id=?", (mid,)).fetchone()
+            if match and match["tournament_match_id"]:
+                return jsonify(error="Результат турнирного матча нельзя отменить после продвижения сетки."),409
+            connection.execute("UPDATE matches SET active=0 WHERE id=?",(mid,))
         elif action=="resolve": connection.execute("UPDATE matches SET dispute_user=NULL,dispute_reason=NULL WHERE id=?",(mid,))
         else:return jsonify(error="Неизвестное действие."),400
     return jsonify(ok=True)

@@ -18,12 +18,17 @@ class ServerFlowTest(unittest.TestCase):
     def setUp(self):
         with db() as connection:
             connection.execute("DELETE FROM requests")
+            connection.execute("DELETE FROM tournament_matches")
+            connection.execute("DELETE FROM tournament_participants")
+            connection.execute("DELETE FROM tournaments")
             connection.execute("DELETE FROM matches")
             connection.execute("DELETE FROM users WHERE role!='admin'")
             created = 1_700_000_000_000
             users = [
                 ("u1", "Максим", "Орлов", "10Б", "maxim", "maxim-password-123"),
                 ("u8", "Ева", "Новикова", "7Б", "eva", "eva-password-123"),
+                ("u2", "Анна", "Белова", "9А", "anna", "anna-password-123"),
+                ("u3", "Илья", "Соколов", "11А", "ilya", "ilya-password-123"),
             ]
             connection.executemany(
                 "INSERT INTO users(id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -96,6 +101,92 @@ class ServerFlowTest(unittest.TestCase):
             self.assertEqual(self.login(client, "admin", "incorrect-password").status_code, 400)
         limited = self.login(client, "admin", "test-admin-password-123")
         self.assertEqual(limited.status_code, 429)
+
+    def test_admin_creates_tournament_and_results_generate_lower_bracket(self):
+        import time
+
+        players = {}
+        credentials = {
+            "u1": ("maxim", "maxim-password-123"),
+            "u8": ("eva", "eva-password-123"),
+            "u2": ("anna", "anna-password-123"),
+            "u3": ("ilya", "ilya-password-123"),
+        }
+        for user_id, (login, password) in credentials.items():
+            client = app.test_client()
+            self.assertEqual(self.login(client, login, password).status_code, 200)
+            players[user_id] = client
+
+        future = int(time.time() * 1000)
+        forbidden = self.post(players["u1"], "/api/admin/tournaments", {
+            "name": "Кубок школы", "description": "Тест", "registrationDeadline": future + 3_600_000,
+            "startAt": future + 7_200_000, "maxPlayers": 8,
+        })
+        self.assertEqual(forbidden.status_code, 403)
+
+        admin = app.test_client()
+        self.assertEqual(self.login(admin, "admin", "test-admin-password-123").status_code, 200)
+        created = self.post(admin, "/api/admin/tournaments", {
+            "name": "Кубок школы", "description": "Двойное выбывание",
+            "registrationDeadline": future + 3_600_000, "startAt": future + 7_200_000, "maxPlayers": 8,
+        })
+        self.assertEqual(created.status_code, 200)
+        tournament_id = created.get_json()["id"]
+
+        for client in players.values():
+            self.assertEqual(self.post(client, f"/api/tournaments/{tournament_id}/join").status_code, 200)
+        self.assertEqual(self.post(admin, f"/api/admin/tournaments/{tournament_id}/start").status_code, 200)
+
+        tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
+        upper_matches = [item for item in tournament["matches"] if item["stage"] == "upper" and item["status"] == "pending"]
+        self.assertEqual(len(upper_matches), 2)
+
+        losers = set()
+        for tournament_match in upper_matches:
+            requester_id, opponent_id = tournament_match["playerOne"], tournament_match["playerTwo"]
+            created_result = self.post(players[requester_id], "/api/requests", {
+                "opponent": opponent_id, "scoreRequester": 11, "scoreOpponent": 7,
+                "tournamentMatchId": tournament_match["id"],
+            })
+            self.assertEqual(created_result.status_code, 200)
+            request_id = created_result.get_json()["id"]
+            self.assertEqual(self.post(players[opponent_id], f"/api/requests/{request_id}/accept").status_code, 200)
+            losers.add(opponent_id)
+
+        tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
+        lower_matches = [item for item in tournament["matches"] if item["stage"] == "lower" and item["status"] == "pending"]
+        self.assertEqual(len(lower_matches), 1)
+        self.assertEqual({lower_matches[0]["playerOne"], lower_matches[0]["playerTwo"]}, losers)
+
+        saw_final = False
+        saw_reset = False
+        for _ in range(12):
+            tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
+            if tournament["status"] == "completed":
+                break
+            pending_matches = [item for item in tournament["matches"] if item["status"] == "pending"]
+            self.assertTrue(pending_matches)
+            losses = {item["userId"]: item["losses"] for item in tournament["participants"]}
+            for tournament_match in pending_matches:
+                if tournament_match["stage"] == "final":
+                    saw_final = True
+                    requester_id = next(uid for uid in (tournament_match["playerOne"], tournament_match["playerTwo"]) if losses[uid] == 1)
+                    opponent_id = tournament_match["playerTwo"] if requester_id == tournament_match["playerOne"] else tournament_match["playerOne"]
+                else:
+                    saw_reset = saw_reset or tournament_match["stage"] == "reset"
+                    requester_id, opponent_id = tournament_match["playerOne"], tournament_match["playerTwo"]
+                result = self.post(players[requester_id], "/api/requests", {
+                    "opponent": opponent_id, "scoreRequester": 11, "scoreOpponent": 7,
+                    "tournamentMatchId": tournament_match["id"],
+                })
+                self.assertEqual(result.status_code, 200)
+                self.assertEqual(self.post(players[opponent_id], f"/api/requests/{result.get_json()['id']}/accept").status_code, 200)
+
+        tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
+        self.assertEqual(tournament["status"], "completed")
+        self.assertIsNotNone(tournament["championId"])
+        self.assertTrue(saw_final)
+        self.assertTrue(saw_reset)
 
 
 if __name__ == "__main__":

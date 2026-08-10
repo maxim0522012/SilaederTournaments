@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f8f6">
   <title>Школьный рейтинг настольного тенниса</title>
   <link rel="icon" href="/static/school-logo.jfif">
-  <link rel="stylesheet" href="/styles.css?v=20260810-1">
+  <link rel="stylesheet" href="/styles.css?v=20260810-2">
 </head>
 <body>
   <header class="site-header">
@@ -16,6 +16,7 @@
         <span>Школьный рейтинг<br><small>настольного тенниса</small></span>
       </a>
       <nav aria-label="Основная навигация">
+        <a href="#tournaments" data-route="tournaments">Турниры</a>
         <a href="#admin" data-route="admin" id="admin-nav" hidden>Управление</a>
       </nav>
       <div id="account-area"></div>
@@ -37,45 +38,28 @@
           </table>
         </div>
       </div>
+    </section>
 
-      <div id="admin-home">
-      <div class="page home-intro">
-        <div>
-          <p class="kicker">ОБЩИЙ РЕЙТИНГ ШКОЛЫ</p>
-          <h1>Настольный теннис.<br>Результаты и рейтинг.</h1>
-          <p class="lead">Играйте матчи, подтверждайте результаты друг у друга и следите за своим местом в общей таблице.</p>
-          <button class="button primary hero-button" data-action="add-match">Подать результат матча</button>
-        </div>
-        <div class="leader-card" id="leader-card"></div>
+    <section class="view page tournaments-page" data-view="tournaments" hidden>
+      <div class="page-heading">
+        <div><p class="kicker">ДВОЙНОЕ ВЫБЫВАНИЕ</p><h1>Турниры</h1><p>Регистрируйтесь, следите за верхней и нижней сеткой и подтверждайте результаты матчей.</p></div>
       </div>
-
-      <div class="summary-bar">
-        <div><strong id="summary-players">0</strong><span>активных игроков</span></div>
-        <div><strong id="summary-matches">0</strong><span>сыграно матчей</span></div>
-        <div><strong id="summary-rating">0</strong><span>лучший Elo</span></div>
-      </div>
-
-      <div class="page home-grid">
-        <section class="panel">
-          <div class="panel-heading"><div><p class="kicker">ОБЩАЯ ТАБЛИЦА</p><h2>Рейтинг игроков</h2></div></div>
-          <div class="compact-table" id="home-rating"></div>
-        </section>
-        <section class="panel recent-panel">
-          <div class="panel-heading"><div><p class="kicker">ИСТОРИЯ ИГР</p><h2>Результаты</h2></div></div>
-          <div id="home-matches"></div>
-        </section>
-      </div>
-      </div>
+      <div id="tournament-list" class="tournament-list"></div>
+      <div id="tournament-detail"></div>
     </section>
 
     <section class="view page" data-view="admin" hidden>
-      <div class="page-heading"><div><p class="kicker">ПАНЕЛЬ АДМИНИСТРАТОРА</p><h1>Управление</h1><p>Подтверждение регистраций, проверка жалоб и управление участниками.</p></div></div>
+      <div class="page-heading"><div><p class="kicker">ПАНЕЛЬ АДМИНИСТРАТОРА</p><h1>Управление</h1><p>Регистрации, жалобы, участники и школьные турниры.</p></div></div>
       <div class="admin-stats" id="admin-stats"></div>
       <div class="admin-grid">
         <section class="panel"><div class="panel-heading"><h2>Заявки на регистрацию</h2></div><div id="pending-users"></div></section>
         <section class="panel"><div class="panel-heading"><h2>Жалобы на результаты</h2></div><div id="disputes"></div></section>
       </div>
       <section class="panel admin-users"><div class="panel-heading"><h2>Все пользователи</h2></div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Пользователь</th><th>Логин</th><th>Статус</th><th>Роль</th><th></th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+      <section class="panel admin-tournaments">
+        <div class="panel-heading"><div><p class="kicker">ТУРНИРНАЯ СЕТКА</p><h2>Управление турнирами</h2></div><button class="button primary" data-action="create-tournament">Создать турнир</button></div>
+        <div id="admin-tournaments-list"></div>
+      </section>
     </section>
 
     <section class="view page status-page" data-view="pending" hidden>
@@ -105,9 +89,10 @@
 
   <dialog id="match-dialog" class="modal">
     <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
-    <p class="kicker">НОВАЯ ЗАЯВКА</p><h2>Подать результат матча</h2>
-    <p class="modal-description">Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.</p>
+    <p class="kicker" id="match-kicker">НОВАЯ ЗАЯВКА</p><h2 id="match-title">Подать результат матча</h2>
+    <p class="modal-description" id="match-description">Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.</p>
     <form id="match-form">
+      <input name="tournamentMatchId" type="hidden">
       <div class="current-player-box">Первый игрок: <strong id="requester-name"></strong></div>
       <label>Соперник
         <div class="student-picker" id="student-picker">
@@ -119,6 +104,23 @@
       <div class="score-row"><label>Ваши очки<input name="scoreRequester" type="number" min="0" max="99" value="11" required></label><span>:</span><label>Очки соперника<input name="scoreOpponent" type="number" min="0" max="99" value="7" required></label></div>
       <p class="form-message" data-form-message></p>
       <button class="button primary wide">Создать заявку</button>
+    </form>
+  </dialog>
+
+  <dialog id="tournament-dialog" class="modal small-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <p class="kicker">НОВЫЙ ТУРНИР</p><h2>Создать турнир</h2>
+    <p class="modal-description">После завершения регистрации запустите автоматическое распределение участников по сетке.</p>
+    <form id="tournament-form">
+      <label>Название<input name="name" maxlength="100" placeholder="Например, Осенний кубок" required></label>
+      <label>Описание<textarea name="description" rows="3" maxlength="600" placeholder="Краткие правила или место проведения"></textarea></label>
+      <div class="form-row">
+        <label>Регистрация до<input name="registrationDeadline" type="datetime-local" required></label>
+        <label>Начало турнира<input name="startAt" type="datetime-local" required></label>
+      </div>
+      <label>Максимум участников<input name="maxPlayers" type="number" min="2" max="32" value="8" required></label>
+      <p class="form-message" data-form-message></p>
+      <button class="button primary wide">Создать турнир</button>
     </form>
   </dialog>
 
@@ -152,6 +154,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20260810-1"></script>
+  <script src="/app.js?v=20260810-3"></script>
 </body>
 </html>
