@@ -1,0 +1,157 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#f7f8f6">
+  <title>Школьный рейтинг настольного тенниса</title>
+  <link rel="icon" href="/static/school-logo.jfif">
+  <link rel="stylesheet" href="/styles.css?v=20260809-3">
+</head>
+<body>
+  <header class="site-header">
+    <div class="header-inner">
+      <a class="site-name" href="#home" data-route="home">
+        <img class="school-logo" src="/static/school-logo.jfif"">
+        <span>Школьный рейтинг<br><small>настольного тенниса</small></span>
+      </a>
+      <nav aria-label="Основная навигация">
+        <a href="#admin" data-route="admin" id="admin-nav" hidden>Управление</a>
+      </nav>
+      <div id="account-area"></div>
+    </div>
+  </header>
+
+  <main>
+    <section class="view" data-view="home">
+      <div id="simple-home" class="page simple-home">
+        <div class="simple-heading">
+          <div><h1>Школьный рейтинг игроков</h1></div>
+          <button class="button primary" data-action="add-match">Подать результат матча</button>
+        </div>
+        <div id="notifications-panel"></div>
+        <div class="data-table-wrap simple-rating-wrap">
+          <table class="data-table">
+            <thead><tr><th>Место</th><th>Игрок</th><th>Матчи</th><th>Победы</th><th>Поражения</th><th>Elo</th></tr></thead>
+            <tbody id="simple-rating"></tbody>
+          </table>
+        </div>
+      </div>
+
+      <div id="admin-home">
+      <div class="page home-intro">
+        <div>
+          <p class="kicker">ОБЩИЙ РЕЙТИНГ ШКОЛЫ</p>
+          <h1>Настольный теннис.<br>Результаты и рейтинг.</h1>
+          <p class="lead">Играйте матчи, подтверждайте результаты друг у друга и следите за своим местом в общей таблице.</p>
+          <button class="button primary hero-button" data-action="add-match">Подать результат матча</button>
+        </div>
+        <div class="leader-card" id="leader-card"></div>
+      </div>
+
+      <div class="summary-bar">
+        <div><strong id="summary-players">0</strong><span>активных игроков</span></div>
+        <div><strong id="summary-matches">0</strong><span>сыграно матчей</span></div>
+        <div><strong id="summary-rating">0</strong><span>лучший Elo</span></div>
+      </div>
+
+      <div class="page home-grid">
+        <section class="panel">
+          <div class="panel-heading"><div><p class="kicker">ОБЩАЯ ТАБЛИЦА</p><h2>Рейтинг игроков</h2></div></div>
+          <div class="compact-table" id="home-rating"></div>
+        </section>
+        <section class="panel recent-panel">
+          <div class="panel-heading"><div><p class="kicker">ИСТОРИЯ ИГР</p><h2>Результаты</h2></div></div>
+          <div id="home-matches"></div>
+        </section>
+      </div>
+      </div>
+    </section>
+
+    <section class="view page" data-view="admin" hidden>
+      <div class="page-heading"><div><p class="kicker">ПАНЕЛЬ АДМИНИСТРАТОРА</p><h1>Управление</h1><p>Подтверждение регистраций, проверка жалоб и управление участниками.</p></div></div>
+      <div class="admin-stats" id="admin-stats"></div>
+      <div class="admin-grid">
+        <section class="panel"><div class="panel-heading"><h2>Заявки на регистрацию</h2></div><div id="pending-users"></div></section>
+        <section class="panel"><div class="panel-heading"><h2>Жалобы на результаты</h2></div><div id="disputes"></div></section>
+      </div>
+      <section class="panel admin-users"><div class="panel-heading"><h2>Все пользователи</h2></div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Пользователь</th><th>Логин</th><th>Статус</th><th>Роль</th><th></th></tr></thead><tbody id="users-body"></tbody></table></div></section>
+    </section>
+
+    <section class="view page status-page" data-view="pending" hidden>
+      <div class="status-card"><span class="status-icon">⌛</span><h1>Заявка отправлена</h1><p>Аккаунт ожидает подтверждения администратора. После подтверждения вы сможете участвовать в матчах и вносить результаты.</p><button class="button secondary" data-action="logout">Выйти</button></div>
+    </section>
+  </main>
+
+  <footer><div class="page"><span>Школьный рейтинг настольного тенниса</span><span>Рейтинг рассчитывается по системе Elo</span></div></footer>
+
+  <dialog id="auth-dialog" class="modal small-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <div class="oidc-login">
+      <img src="/static/school-logo.jfif" alt="" class="oidc-logo">
+      <h2>Вход для учеников и учителей</h2>
+      <p>Используйте свою учётную запись ЛК Силаэдра.</p>
+      <a class="button primary wide oidc-button" id="oidc-login-button" href="/auth/silaeder/login">Войти через ЛК Силаэдра</a>
+      <p class="form-message" id="oidc-message"></p>
+    </div>
+    <div class="auth-divider"><span>Резервный вход администратора</span></div>
+    <form id="login-form">
+      <label>Логин<input name="login" autocomplete="username" required></label>
+      <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+      <p class="form-message" data-form-message></p>
+      <button class="button primary wide">Войти</button>
+    </form>
+  </dialog>
+
+  <dialog id="match-dialog" class="modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <p class="kicker">НОВАЯ ЗАЯВКА</p><h2>Подать результат матча</h2>
+    <p class="modal-description">Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.</p>
+    <form id="match-form">
+      <div class="current-player-box">Первый игрок: <strong id="requester-name"></strong></div>
+      <label>Соперник
+        <div class="student-picker" id="student-picker">
+          <input id="opponent-search" type="search" autocomplete="off" placeholder="Начните вводить имя или класс" aria-autocomplete="list" aria-controls="student-suggestions" aria-expanded="false" required>
+          <input name="opponent" type="hidden">
+          <div class="student-suggestions" id="student-suggestions" role="listbox" hidden></div>
+        </div>
+      </label>
+      <div class="score-row"><label>Ваши очки<input name="scoreRequester" type="number" min="0" max="99" value="11" required></label><span>:</span><label>Очки соперника<input name="scoreOpponent" type="number" min="0" max="99" value="7" required></label></div>
+      <p class="form-message" data-form-message></p>
+      <button class="button primary wide">Создать заявку</button>
+    </form>
+  </dialog>
+
+  <dialog id="qr-dialog" class="modal small-modal qr-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <p class="kicker">ПОДТВЕРЖДЕНИЕ РЕЗУЛЬТАТА</p><h2>Покажите QR-код сопернику</h2>
+    <p class="modal-description">Соперник должен отсканировать код и войти в свой аккаунт.</p>
+    <div class="qr-box"><img id="request-qr" width="220" height="220" alt="QR-код для подтверждения матча"></div>
+    <div class="request-summary" id="request-summary"></div>
+    <button class="button primary wide" id="send-notification">Отправить уведомление сопернику</button>
+    <p class="qr-note" id="notification-status">Можно использовать любой из двух способов подтверждения.</p>
+  </dialog>
+
+  <dialog id="confirm-dialog" class="modal small-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <p class="kicker">ПОДТВЕРЖДЕНИЕ МАТЧА</p><h2>Вам отправили результат</h2>
+    <div class="confirm-result" id="confirm-result"></div>
+    <p class="modal-description">После подтверждения результат появится на главной, а рейтинг Elo будет пересчитан.</p>
+    <div class="confirm-actions"><button class="button danger" id="reject-request">Отклонить</button><button class="button primary" id="accept-request">Подтвердить</button></div>
+  </dialog>
+
+  <dialog id="profile-dialog" class="modal profile-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <div id="profile-content"></div>
+  </dialog>
+
+  <dialog id="dispute-dialog" class="modal small-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <h2>Сообщить об ошибке</h2><p class="modal-description">Администратор проверит результат и при необходимости отменит матч.</p>
+    <form id="dispute-form"><input type="hidden" name="matchId"><label>Комментарий<textarea name="reason" rows="4" placeholder="Что указано неверно?" required></textarea></label><p class="form-message" data-form-message></p><button class="button primary wide">Отправить жалобу</button></form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status"></div>
+  <script src="/app.js?v=20260809-3"></script>
+</body>
+</html>
