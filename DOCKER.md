@@ -52,4 +52,12 @@ docker compose exec tennis flask --app app db current
 
 На рабочем сервере используйте только `db upgrade`; команда `db migrate` предназначена для разработки.
 
+Для локальной разработки можно включить `ALLOW_LOCAL_USER_LOGIN=true` и создать тестовых учеников командой:
+
+```powershell
+.venv\Scripts\python.exe -m flask --app app seed-local-demo
+```
+
+Будут созданы логины `student01`–`student12` с паролем `123456`. На рабочем сервере обязательно оставляйте `ALLOW_LOCAL_USER_LOGIN=false` или не задавайте эту переменную вовсе.
+
 Актуальные данные хранятся в volume `tennis-data-v2`. Старый `tennis-data` подключён только для чтения и оставлен для безопасного отката. Команда `docker compose down -v` удалит оба volume вместе с Docker-копиями базы данных.

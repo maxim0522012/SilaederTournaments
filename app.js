@@ -76,8 +76,8 @@ function tournamentStatus(tournament){
 function tournamentStageLabel(stage,round){
   if(stage==='upper') return `Верхняя сетка · Раунд ${round}`;
   if(stage==='lower') return `Нижняя сетка · Раунд ${round}`;
-  if(stage==='final') return 'Финал';
-  return 'Решающая игра';
+  if(stage==='final') return 'Гранд-финал';
+  return 'Повторный финал · оба игрока имеют по одному поражению';
 }
 function tournamentMatchById(id){
   for(const tournament of db.tournaments||[]){ const match=tournament.matches.find(item=>item.id===id); if(match) return match; }

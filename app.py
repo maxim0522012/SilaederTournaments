@@ -40,6 +40,7 @@ APP_URL = EXTERNAL_URL
 QR_BASE_URL = os.environ.get("QR_BASE_URL", EXTERNAL_URL).rstrip("/")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
+ALLOW_LOCAL_USER_LOGIN = os.environ.get("ALLOW_LOCAL_USER_LOGIN", "false").lower() == "true"
 OIDC_ISSUER = os.environ.get("CRM_OIDC_ISSUER", "https://lk.silaeder.ru").rstrip("/")
 OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and all(
     os.environ.get(key) for key in ("SECRET_KEY", "CRM_OIDC_CLIENT_ID", "CRM_OIDC_CLIENT_SECRET")
@@ -167,6 +168,45 @@ def seed_database():
         connection.execute("PRAGMA optimize")
 
 
+LOCAL_DEMO_USERS = [
+    ("demo-01", "Алексей", "Смирнов", "7А", "student01"),
+    ("demo-02", "Мария", "Иванова", "7Б", "student02"),
+    ("demo-03", "Дмитрий", "Кузнецов", "8А", "student03"),
+    ("demo-04", "Анна", "Попова", "8Б", "student04"),
+    ("demo-05", "Михаил", "Соколов", "9А", "student05"),
+    ("demo-06", "Елена", "Лебедева", "9Б", "student06"),
+    ("demo-07", "Иван", "Козлов", "10А", "student07"),
+    ("demo-08", "София", "Новикова", "10Б", "student08"),
+    ("demo-09", "Артём", "Морозов", "11А", "student09"),
+    ("demo-10", "Полина", "Волкова", "11Б", "student10"),
+    ("demo-11", "Никита", "Павлов", "8В", "student11"),
+    ("demo-12", "Дарья", "Фёдорова", "9В", "student12"),
+]
+
+
+def seed_local_demo_users():
+    if not ALLOW_LOCAL_USER_LOGIN:
+        raise RuntimeError("Локальные тестовые аккаунты отключены. Установите ALLOW_LOCAL_USER_LOGIN=true.")
+    password_hash = generate_password_hash("123456")
+    with db() as connection:
+        for user_id, first_name, last_name, class_name, login_name in LOCAL_DEMO_USERS:
+            existing = connection.execute("SELECT id FROM users WHERE login=?", (login_name,)).fetchone()
+            if existing:
+                connection.execute(
+                    """UPDATE users SET first_name=?,last_name=?,class_name=?,password_hash=?,role='user',
+                       status='active',is_player=1 WHERE id=?""",
+                    (first_name, last_name, class_name, password_hash, existing["id"]),
+                )
+            else:
+                connection.execute(
+                    """INSERT INTO users(
+                         id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at
+                       ) VALUES(?,?,?,?,?,?,'user','active',1,?)""",
+                    (user_id, first_name, last_name, class_name, login_name, password_hash, now_ms()),
+                )
+        connection.execute("PRAGMA optimize")
+
+
 def user_row(user_id):
     if not user_id:
         return None
@@ -224,8 +264,11 @@ def calculate_server_ratings(connection):
     return ratings
 
 
-def create_tournament_round(connection, tournament_id, stage, players):
+def create_tournament_round(connection, tournament_id, stage, players, initial=False):
     ordered = sorted(players, key=lambda row: (row["seed"] or 10_000, row["joined_at"]))
+    if initial:
+        bracket_size = 1 << (len(ordered) - 1).bit_length()
+        ordered.extend([None] * (bracket_size - len(ordered)))
     sequence = connection.execute(
         "SELECT COALESCE(MAX(sequence),0)+1 FROM tournament_matches WHERE tournament_id=?", (tournament_id,)
     ).fetchone()[0]
@@ -238,6 +281,19 @@ def create_tournament_round(connection, tournament_id, stage, players):
     while len(ordered) > 1:
         player_one = ordered.pop(0)
         player_two = ordered.pop(-1)
+        if player_one is None:
+            player_one, player_two = player_two, player_one
+        if player_two is None:
+            connection.execute(
+                """INSERT INTO tournament_matches(
+                     id,tournament_id,sequence,stage,round_number,position,player_one,player_two,
+                     winner,loser,status,result_match_id,created_at,completed_at
+                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (f"tm-{secrets.token_hex(8)}", tournament_id, sequence, stage, round_number, position,
+                 player_one["user_id"], None, player_one["user_id"], None, "bye", None, created, created),
+            )
+            position += 1
+            continue
         connection.execute(
             """INSERT INTO tournament_matches(
                  id,tournament_id,sequence,stage,round_number,position,player_one,player_two,
@@ -292,7 +348,7 @@ def advance_tournament(connection, tournament_id):
         if len(upper) == 1 and len(lower) == 1:
             stage, players = "final", [upper[0], lower[0]]
         elif len(upper) > 1 and len(lower) > 1:
-            stage = "lower" if last_stage == "upper" else "upper"
+            stage = "lower" if last_stage == "upper" or len(lower) >= len(upper) else "upper"
             players = lower if stage == "lower" else upper
         elif len(upper) > 1:
             stage, players = "upper", upper
@@ -309,7 +365,7 @@ def advance_tournament(connection, tournament_id):
             (winner["user_id"], now_ms(), tournament_id),
         )
         return
-    create_tournament_round(connection, tournament_id, stage, players)
+    create_tournament_round(connection, tournament_id, stage, players, initial=last_stage is None)
 
 
 def serialize_tournaments(connection):
@@ -629,7 +685,7 @@ def login():
         return jsonify(error="Стандартный пароль администратора отключён. Задайте ADMIN_PASSWORD."), 403
     if user["status"] in {"inactive","rejected"}:
         return jsonify(error="Аккаунт недоступен. Обратитесь к администратору."),403
-    if OIDC_ENABLED and user["role"] != "admin":
+    if OIDC_ENABLED and user["role"] != "admin" and not ALLOW_LOCAL_USER_LOGIN:
         return jsonify(error="Для учеников и учителей используйте вход через ЛК Силаэдра."),403
     session.clear()
     session.permanent = True
@@ -951,6 +1007,13 @@ def admin_match(admin,mid,action):
 def seed_data_command():
     """Create the first administrator and optional demo data after migrations."""
     seed_database()
+
+
+@app.cli.command("seed-local-demo")
+def seed_local_demo_command():
+    """Create local-only student accounts with a shared development password."""
+    seed_local_demo_users()
+    print("Создано 12 локальных учеников: student01–student12, пароль 123456")
 
 if __name__ == "__main__":
     with app.app_context():

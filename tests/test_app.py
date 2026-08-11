@@ -34,6 +34,10 @@ class ServerFlowTest(unittest.TestCase):
                 ("u8", "Ева", "Новикова", "7Б", "eva", "eva-password-123"),
                 ("u2", "Анна", "Белова", "9А", "anna", "anna-password-123"),
                 ("u3", "Илья", "Соколов", "11А", "ilya", "ilya-password-123"),
+                ("u4", "Мария", "Волкова", "8В", "maria", "maria-password-123"),
+                ("u5", "Артём", "Кузнецов", "10А", "artem", "artem-password-123"),
+                ("u6", "София", "Лебедева", "9Б", "sofia", "sofia-password-123"),
+                ("u7", "Даниил", "Морозов", "8А", "daniil", "daniil-password-123"),
             ]
             connection.executemany(
                 "INSERT INTO users(id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
@@ -116,6 +120,10 @@ class ServerFlowTest(unittest.TestCase):
             "u8": ("eva", "eva-password-123"),
             "u2": ("anna", "anna-password-123"),
             "u3": ("ilya", "ilya-password-123"),
+            "u4": ("maria", "maria-password-123"),
+            "u5": ("artem", "artem-password-123"),
+            "u6": ("sofia", "sofia-password-123"),
+            "u7": ("daniil", "daniil-password-123"),
         }
         for user_id, (login, password) in credentials.items():
             client = app.test_client()
@@ -144,7 +152,7 @@ class ServerFlowTest(unittest.TestCase):
 
         tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
         upper_matches = [item for item in tournament["matches"] if item["stage"] == "upper" and item["status"] == "pending"]
-        self.assertEqual(len(upper_matches), 2)
+        self.assertEqual(len(upper_matches), 4)
 
         losers = set()
         for tournament_match in upper_matches:
@@ -160,8 +168,11 @@ class ServerFlowTest(unittest.TestCase):
 
         tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
         lower_matches = [item for item in tournament["matches"] if item["stage"] == "lower" and item["status"] == "pending"]
-        self.assertEqual(len(lower_matches), 1)
-        self.assertEqual({lower_matches[0]["playerOne"], lower_matches[0]["playerTwo"]}, losers)
+        self.assertEqual(len(lower_matches), 2)
+        self.assertEqual(
+            {player for match in lower_matches for player in (match["playerOne"], match["playerTwo"])},
+            losers,
+        )
 
         saw_final = False
         saw_reset = False
@@ -192,6 +203,11 @@ class ServerFlowTest(unittest.TestCase):
         self.assertIsNotNone(tournament["championId"])
         self.assertTrue(saw_final)
         self.assertTrue(saw_reset)
+        self.assertFalse(any(match["status"] == "bye" for match in tournament["matches"]))
+        stage_counts = {}
+        for match in tournament["matches"]:
+            stage_counts[match["stage"]] = stage_counts.get(match["stage"], 0) + 1
+        self.assertEqual(stage_counts, {"upper": 7, "lower": 6, "final": 1, "reset": 1})
 
 
 if __name__ == "__main__":
