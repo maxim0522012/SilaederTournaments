@@ -180,7 +180,6 @@ class ServerFlowTest(unittest.TestCase):
         )
 
         saw_final = False
-        saw_reset = False
         for _ in range(12):
             tournament = next(item for item in admin.get("/api/state").get_json()["tournaments"] if item["id"] == tournament_id)
             if tournament["status"] == "completed":
@@ -194,7 +193,6 @@ class ServerFlowTest(unittest.TestCase):
                     requester_id = next(uid for uid in (tournament_match["playerOne"], tournament_match["playerTwo"]) if losses[uid] == 1)
                     opponent_id = tournament_match["playerTwo"] if requester_id == tournament_match["playerOne"] else tournament_match["playerOne"]
                 else:
-                    saw_reset = saw_reset or tournament_match["stage"] == "reset"
                     requester_id, opponent_id = tournament_match["playerOne"], tournament_match["playerTwo"]
                 result = self.post(players[requester_id], "/api/requests", {
                     "opponent": opponent_id, "scoreRequester": 11, "scoreOpponent": 7,
@@ -207,12 +205,46 @@ class ServerFlowTest(unittest.TestCase):
         self.assertEqual(tournament["status"], "completed")
         self.assertIsNotNone(tournament["championId"])
         self.assertTrue(saw_final)
-        self.assertTrue(saw_reset)
         self.assertFalse(any(match["status"] == "bye" for match in tournament["matches"]))
         stage_counts = {}
         for match in tournament["matches"]:
             stage_counts[match["stage"]] = stage_counts.get(match["stage"], 0) + 1
-        self.assertEqual(stage_counts, {"upper": 7, "lower": 6, "final": 1, "reset": 1})
+        self.assertEqual(stage_counts, {"upper": 7, "lower": 6, "final": 1})
+
+        ordered_matches = sorted(tournament["matches"], key=lambda match: (match["sequence"], match["position"]))
+
+        def next_match(player_id, source):
+            return next((match for match in ordered_matches
+                         if match["sequence"] > source["sequence"]
+                         and player_id in {match["playerOne"], match["playerTwo"]}), None)
+
+        for match in ordered_matches:
+            if match["stage"] == "upper":
+                winner_next = next_match(match["winner"], match)
+                loser_next = next_match(match["loser"], match)
+                self.assertIsNotNone(winner_next)
+                self.assertIn(winner_next["stage"], {"upper", "final"})
+                self.assertIsNotNone(loser_next)
+                self.assertEqual(loser_next["stage"], "lower")
+            elif match["stage"] == "lower":
+                winner_next = next_match(match["winner"], match)
+                self.assertIsNotNone(winner_next)
+                self.assertIn(winner_next["stage"], {"lower", "final"})
+                self.assertIsNone(next_match(match["loser"], match))
+
+        decisive = max(
+            (match for match in ordered_matches if match["stage"] in {"final", "reset"}),
+            key=lambda match: (match["sequence"], match["position"]),
+        )
+        lower_final = max(
+            (match for match in ordered_matches if match["stage"] == "lower"),
+            key=lambda match: (match["sequence"], match["position"]),
+        )
+        self.assertEqual(tournament["podium"], {
+            "first": tournament["championId"],
+            "second": decisive["loser"],
+            "third": lower_final["loser"],
+        })
 
 
 if __name__ == "__main__":

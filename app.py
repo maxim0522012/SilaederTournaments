@@ -323,6 +323,27 @@ def create_tournament_round(connection, tournament_id, stage, players, initial=F
         )
 
 
+def next_double_elimination_round(upper, lower, last_stage):
+    """Return the next bracket and its players for a standard double-elimination tournament."""
+    if upper and lower:
+        if len(upper) == 1 and len(lower) == 1:
+            return "final", [upper[0], lower[0]]
+        if len(upper) > 1 and len(lower) > 1:
+            # After an upper round its losers must enter the lower bracket. When both
+            # brackets have the same size, the lower bracket is reduced once more
+            # before the next upper round so that nobody receives an extra life.
+            stage = "lower" if last_stage == "upper" or len(lower) >= len(upper) else "upper"
+            return stage, lower if stage == "lower" else upper
+        if len(upper) > 1:
+            return "upper", upper
+        return "lower", lower
+    if len(upper) > 1:
+        return "upper", upper
+    if len(lower) > 1:
+        return "lower", lower
+    return None, upper or lower
+
+
 def advance_tournament(connection, tournament_id):
     tournament = connection.execute("SELECT * FROM tournaments WHERE id=?", (tournament_id,)).fetchone()
     if not tournament or tournament["status"] != "active":
@@ -331,6 +352,17 @@ def advance_tournament(connection, tournament_id):
         "SELECT 1 FROM tournament_matches WHERE tournament_id=? AND status='pending' LIMIT 1", (tournament_id,)
     ).fetchone():
         return
+    last = connection.execute(
+        "SELECT stage,winner FROM tournament_matches WHERE tournament_id=? ORDER BY sequence DESC LIMIT 1", (tournament_id,)
+    ).fetchone()
+    last_stage = last["stage"] if last else None
+    if last_stage in {"final", "reset"} and last["winner"]:
+        connection.execute(
+            "UPDATE tournaments SET status='completed',champion_id=?,completed_at=? WHERE id=?",
+            (last["winner"], now_ms(), tournament_id),
+        )
+        return
+
     active_players = connection.execute(
         """SELECT * FROM tournament_participants
            WHERE tournament_id=? AND eliminated=0 ORDER BY seed,joined_at""", (tournament_id,)
@@ -347,33 +379,29 @@ def advance_tournament(connection, tournament_id):
 
     upper = [player for player in active_players if player["losses"] == 0]
     lower = [player for player in active_players if player["losses"] == 1]
-    last = connection.execute(
-        "SELECT stage FROM tournament_matches WHERE tournament_id=? ORDER BY sequence DESC LIMIT 1", (tournament_id,)
-    ).fetchone()
-    last_stage = last["stage"] if last else None
-
-    if upper and lower:
-        if len(upper) == 1 and len(lower) == 1:
-            stage, players = "final", [upper[0], lower[0]]
-        elif len(upper) > 1 and len(lower) > 1:
-            stage = "lower" if last_stage == "upper" or len(lower) >= len(upper) else "upper"
-            players = lower if stage == "lower" else upper
-        elif len(upper) > 1:
-            stage, players = "upper", upper
-        else:
-            stage, players = "lower", lower
-    elif len(upper) > 1:
-        stage, players = "upper", upper
-    elif len(lower) > 1:
-        stage, players = ("reset" if last_stage == "final" else "lower"), lower
-    else:
-        winner = (upper or lower)[0]
+    stage, players = next_double_elimination_round(upper, lower, last_stage)
+    if stage is None:
+        winner = players[0]
         connection.execute(
             "UPDATE tournaments SET status='completed',champion_id=?,completed_at=? WHERE id=?",
             (winner["user_id"], now_ms(), tournament_id),
         )
         return
     create_tournament_round(connection, tournament_id, stage, players, initial=last_stage is None)
+
+
+def tournament_podium(tournament, bracket):
+    if tournament["status"] != "completed" or not tournament["champion_id"]:
+        return None
+    decisive_matches = [item for item in bracket if item["stage"] in {"final", "reset"} and item["status"] == "completed"]
+    lower_matches = [item for item in bracket if item["stage"] == "lower" and item["status"] == "completed"]
+    decisive = max(decisive_matches, key=lambda item: (item["sequence"], item["position"]), default=None)
+    lower_final = max(lower_matches, key=lambda item: (item["sequence"], item["position"]), default=None)
+    return {
+        "first": tournament["champion_id"],
+        "second": decisive["loser"] if decisive else None,
+        "third": lower_final["loser"] if lower_final else None,
+    }
 
 
 def serialize_tournaments(connection):
@@ -385,11 +413,12 @@ def serialize_tournaments(connection):
         bracket = connection.execute(
             "SELECT * FROM tournament_matches WHERE tournament_id=? ORDER BY sequence,position", (row["id"],)
         ).fetchall()
+        podium = tournament_podium(row, bracket)
         tournaments.append({
             "id": row["id"], "name": row["name"], "description": row["description"],
             "registrationDeadline": row["registration_deadline"], "startAt": row["start_at"],
             "maxPlayers": row["max_players"], "status": row["status"],
-            "championId": row["champion_id"], "createdAt": row["created_at"],
+            "championId": row["champion_id"], "podium": podium, "createdAt": row["created_at"],
             "participants": [{"userId": item["user_id"], "seed": item["seed"], "losses": item["losses"],
                               "eliminated": bool(item["eliminated"]), "joinedAt": item["joined_at"]}
                              for item in participants],

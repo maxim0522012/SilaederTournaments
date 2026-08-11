@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f8f6">
   <title>Школьный рейтинг настольного тенниса</title>
   <link rel="icon" href="/static/school-logo.jfif">
-  <link rel="stylesheet" href="/styles.css?v=20260810-2">
+  <link rel="stylesheet" href="/styles.css?v=20260811-7">
 </head>
 <body>
   <header class="site-header">
@@ -17,6 +17,7 @@
       </a>
       <nav aria-label="Основная навигация">
         <a href="#tournaments" data-route="tournaments">Турниры</a>
+        <a href="#history" data-route="history" id="history-nav" hidden>История</a>
         <a href="#admin" data-route="admin" id="admin-nav" hidden>Управление</a>
       </nav>
       <div id="account-area"></div>
@@ -26,6 +27,7 @@
   <main>
     <section class="view" data-view="home">
       <div id="simple-home" class="page simple-home">
+        <section id="player-summary" class="player-summary" aria-label="Статистика игрока" hidden></section>
         <div class="simple-heading">
           <div><h1>Школьный рейтинг игроков</h1></div>
           <button class="button primary" data-action="add-match">Подать результат матча</button>
@@ -46,6 +48,13 @@
       </div>
       <div id="tournament-list" class="tournament-list"></div>
       <div id="tournament-detail"></div>
+    </section>
+
+    <section class="view page history-page" data-view="history" hidden>
+      <div class="page-heading">
+        <div><p class="kicker">ЛИЧНАЯ СТАТИСТИКА</p><h1>История матчей</h1><p>Все сыгранные матчи и результаты вашего профиля.</p></div>
+      </div>
+      <div id="history-content"></div>
     </section>
 
     <section class="view page" data-view="admin" hidden>
@@ -154,6 +163,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20260811-1"></script>
+  <script src="/app.js?v=20260811-7"></script>
 </body>
 </html>

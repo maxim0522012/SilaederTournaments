@@ -50,7 +50,7 @@ function rankedPlayers(includeInactive=false){
 
 function render(){
   ratingCache=calculateRatings();
-  renderAccount(); renderHome(); renderNotifications(); renderTournaments(); renderAdmin();
+  renderAccount(); renderHome(); renderHistory(); renderNotifications(); renderTournaments(); renderAdmin();
   const requested=location.pathname.startsWith('/confirm/')?'home':(location.hash||'#home').slice(1);
   showView(requested,false);
   if(location.pathname.startsWith('/confirm/')) setTimeout(()=>handleConfirmationLink(location.pathname.split('/').pop()),0);
@@ -59,6 +59,7 @@ function render(){
 function renderAccount(){
   const me=currentUser();
   document.querySelector('#admin-nav').hidden=me?.role!=='admin';
+  document.querySelector('#history-nav').hidden=!me?.isPlayer;
   const area=document.querySelector('#account-area');
   if(!me){ area.innerHTML='<button class="login-button" data-action="open-auth">Войти</button>'; return; }
   area.innerHTML=`<button class="account-button" data-profile="${me.id}" title="Открыть профиль"><span class="account-avatar">${escapeHtml(initials(me))}</span><span class="account-name">${escapeHtml(me.firstName)}<small>${me.status==='pending'?'Ожидает подтверждения':me.role==='admin'?'Администратор':me.role==='teacher'?'Учитель':escapeHtml(me.className)}</small></span></button><button class="text-action" data-action="logout">Выйти</button>`;
@@ -66,7 +67,87 @@ function renderAccount(){
 
 function renderHome(){
   const players=rankedPlayers();
+  renderPlayerSummary(players);
   document.querySelector('#simple-rating').innerHTML=players.map((player,index)=>`<tr><td><span class="rank-number">${index+1}</span></td><td><button class="player-link" data-profile="${player.id}">${publicName(player)}</button></td><td>${player.games}</td><td>${player.wins}</td><td>${player.losses}</td><td><span class="rating-number">${player.rating}</span></td></tr>`).join('')||'<tr><td colspan="6" class="empty">Игроков пока нет</td></tr>';
+}
+
+function renderPlayerSummary(players){
+  const summary=document.querySelector('#player-summary');
+  const me=currentUser();
+  if(!me?.isPlayer){ summary.hidden=true; summary.innerHTML=''; return; }
+
+  const stats=ratingCache[me.id]||{rating:ELO_START,games:0};
+  const place=players.findIndex(player=>player.id===me.id);
+  const recentMatches=db.matches
+    .filter(match=>match.active&&(match.playerOne===me.id||match.playerTwo===me.id))
+    .sort((a,b)=>b.createdAt-a.createdAt)
+    .slice(0,3);
+  const recentHtml=recentMatches.map(match=>{
+    const isFirst=match.playerOne===me.id;
+    const ownScore=isFirst?match.scoreOne:match.scoreTwo;
+    const opponentScore=isFirst?match.scoreTwo:match.scoreOne;
+    const opponent=userById(isFirst?match.playerTwo:match.playerOne);
+    const won=ownScore>opponentScore;
+    return `<div class="player-summary-game ${won?'win':'loss'}">
+      <span class="summary-game-result">${won?'Победа':'Поражение'}</span>
+      <span class="summary-game-opponent">${publicName(opponent)}</span>
+      <strong>${ownScore}:${opponentScore}</strong>
+      <time datetime="${new Date(match.createdAt).toISOString()}">${formatDate(match.createdAt)}</time>
+    </div>`;
+  }).join('')||'<p class="player-summary-empty">Матчей пока нет — подайте первый результат.</p>';
+
+  summary.innerHTML=`
+    <div class="player-summary-identity">
+      <span class="player-summary-avatar">${escapeHtml(initials(me))}</span>
+      <div><span class="player-summary-label">Ваш профиль</span><button class="player-summary-name" data-profile="${me.id}">${publicName(me)}</button></div>
+    </div>
+    <div class="player-summary-stat"><strong>${place>=0?`#${place+1}`:'—'}</strong><span>место</span></div>
+    <div class="player-summary-stat"><strong>${stats.rating}</strong><span>рейтинг Elo</span></div>
+    <div class="player-summary-recent"><span class="player-summary-label">Последние игры</span><div class="player-summary-games">${recentHtml}</div></div>`;
+  summary.hidden=false;
+}
+
+function renderHistory(){
+  const content=document.querySelector('#history-content');
+  const me=currentUser();
+  if(!me?.isPlayer){
+    content.innerHTML=`<div class="history-empty panel"><h2>${me?'Нет профиля игрока':'Войдите в аккаунт'}</h2><p>${me?'Для этого аккаунта не создан профиль участника.':'История матчей доступна после входа.'}</p>${me?'':'<button class="button primary" data-action="open-auth">Войти</button>'}</div>`;
+    return;
+  }
+
+  const stats=ratingCache[me.id]||{games:0,wins:0,losses:0};
+  const matches=db.matches
+    .filter(match=>match.active&&(match.playerOne===me.id||match.playerTwo===me.id))
+    .sort((a,b)=>b.createdAt-a.createdAt);
+  const rows=matches.map(match=>{
+    const isFirst=match.playerOne===me.id;
+    const ownScore=isFirst?match.scoreOne:match.scoreTwo;
+    const opponentScore=isFirst?match.scoreTwo:match.scoreOne;
+    const opponent=userById(isFirst?match.playerTwo:match.playerOne);
+    const won=ownScore>opponentScore;
+    const delta=(won?1:-1)*(match._delta||0);
+    return `<tr>
+      <td><time datetime="${new Date(match.createdAt).toISOString()}">${formatDate(match.createdAt)}</time></td>
+      <td><span class="history-result ${won?'win':'loss'}">${won?'Победа':'Поражение'}</span></td>
+      <td><button class="player-link" data-profile="${opponent?.id||''}">${publicName(opponent)}</button></td>
+      <td><strong class="history-score">${ownScore}:${opponentScore}</strong></td>
+      <td><span class="history-kind">${match.tournamentMatchId?'Турнир':'Обычный матч'}</span></td>
+      <td><span class="history-delta ${delta>=0?'positive':'negative'}">${delta>=0?'+':''}${delta}</span></td>
+    </tr>`;
+  }).join('')||'<tr><td colspan="6" class="empty">Сыгранных матчей пока нет</td></tr>';
+
+  content.innerHTML=`
+    <div class="history-stats">
+      <div class="history-stat"><strong>${stats.games}</strong><span>Матчей</span></div>
+      <div class="history-stat wins"><strong>${stats.wins}</strong><span>Побед</span></div>
+      <div class="history-stat losses"><strong>${stats.losses}</strong><span>Поражений</span></div>
+    </div>
+    <div class="data-table-wrap history-table-wrap">
+      <table class="data-table history-table">
+        <thead><tr><th>Дата</th><th>Результат</th><th>Соперник</th><th>Счёт</th><th>Тип</th><th>Elo</th></tr></thead>
+        <tbody>${rows}</tbody>
+      </table>
+    </div>`;
 }
 
 function tournamentStatus(tournament){
@@ -91,16 +172,85 @@ function tournamentMatchAction(match){
   if(resultRequest.requester===me.id) return `<button class="button small secondary" data-show-qr="${resultRequest.id}">Показать QR</button>`;
   return `<button class="button small primary" data-confirm-request="${resultRequest.id}">Проверить результат</button>`;
 }
-function bracketMatchHtml(match){
+function tournamentPlayerColors(tournament){
+  const colors={};
+  tournament.participants.forEach((participant,index)=>{ colors[participant.userId]=`hsl(${Math.round((index*137.508+18)%360)} 68% 40%)`; });
+  return colors;
+}
+function bracketMatchHtml(match,allMatches,playerColors){
   const one=userById(match.playerOne),two=userById(match.playerTwo),result=db.matches.find(item=>item.id===match.resultMatchId);
-  if(match.status==='bye') return `<div class="bracket-match bye"><div><strong>${publicName(one)}</strong><span>Проход без игры</span></div></div>`;
+  const oneColor=playerColors[match.playerOne]||'var(--green)',twoColor=playerColors[match.playerTwo]||'var(--muted)';
+  if(match.status==='bye') return `<div class="bracket-match bye" data-match-id="${escapeHtml(match.id)}"><div class="bracket-player winner" style="--player-color:${oneColor}" data-player-id="${escapeHtml(match.playerOne)}"><span>${publicName(one)}<small>Проход без игры</small></span><strong>→</strong></div></div>`;
   const scoreOne=result?(result.playerOne===match.playerOne?result.scoreOne:result.scoreTwo):null;
   const scoreTwo=result?(result.playerOne===match.playerTwo?result.scoreOne:result.scoreTwo):null;
-  return `<div class="bracket-match ${match.status}">
-    <div class="bracket-player ${match.winner===match.playerOne?'winner':''}"><span>${publicName(one)}</span><strong>${scoreOne??'—'}</strong></div>
-    <div class="bracket-player ${match.winner===match.playerTwo?'winner':''}"><span>${publicName(two)}</span><strong>${scoreTwo??'—'}</strong></div>
+  const nextMatch=playerId=>allMatches.find(item=>item.sequence>match.sequence&&[item.playerOne,item.playerTwo].includes(playerId));
+  const oneNext=nextMatch(match.playerOne),twoNext=nextMatch(match.playerTwo);
+  const oneEliminated=match.loser===match.playerOne&&!oneNext;
+  const twoEliminated=match.loser===match.playerTwo&&!twoNext;
+  const transferLabel=next=>{
+    if(!next||next.stage===match.stage) return '';
+    if(next.stage==='lower') return `↓ Нижняя сетка · раунд ${next.roundNumber}`;
+    if(next.stage==='final') return '→ Гранд-финал';
+    return '→ Повторный финал';
+  };
+  const oneTransfer=transferLabel(oneNext),twoTransfer=transferLabel(twoNext);
+  return `<div class="bracket-match ${match.status}" data-match-id="${escapeHtml(match.id)}">
+    <div class="bracket-player ${match.winner===match.playerOne?'winner':''} ${oneEliminated?'eliminated':''}" style="--player-color:${oneColor}" data-player-id="${escapeHtml(match.playerOne)}"><span>${publicName(one)}${oneEliminated?'<small>Выбыл</small>':oneTransfer?`<small class="bracket-transfer">${oneTransfer}</small>`:''}</span><strong>${scoreOne??'—'}</strong></div>
+    <div class="bracket-player ${match.winner===match.playerTwo?'winner':''} ${twoEliminated?'eliminated':''}" style="--player-color:${twoColor}" data-player-id="${escapeHtml(match.playerTwo||'')}"><span>${publicName(two)}${twoEliminated?'<small>Выбыл</small>':twoTransfer?`<small class="bracket-transfer">${twoTransfer}</small>`:''}</span><strong>${scoreTwo??'—'}</strong></div>
     <div class="bracket-action">${tournamentMatchAction(match)}</div>
   </div>`;
+}
+function bracketTransitions(matches){
+  const ordered=[...matches].sort((a,b)=>a.sequence-b.sequence||a.position-b.position);
+  const transitions=[];
+  ordered.forEach(match=>{
+    if(!['completed','bye'].includes(match.status)) return;
+    [{playerId:match.winner,type:'winner'},{playerId:match.loser,type:'loser'}].forEach(({playerId,type})=>{
+      if(!playerId) return;
+      const target=ordered.find(item=>item.sequence>match.sequence&&[item.playerOne,item.playerTwo].includes(playerId));
+      if(target) transitions.push({fromId:match.id,toId:target.id,playerId,type});
+    });
+  });
+  return transitions;
+}
+function addBracketConnector(layer,x,y,width,height,className,color){
+  const line=document.createElement('span');
+  line.className=`bracket-connector ${className}`;
+  Object.assign(line.style,{left:`${x}px`,top:`${y}px`,width:`${Math.max(width,2)}px`,height:`${Math.max(height,2)}px`});
+  line.style.setProperty('--connector-color',color);
+  layer.appendChild(line);
+}
+function drawTournamentConnections(tournament){
+  const canvases=[...document.querySelectorAll('[data-bracket-id]')].filter(item=>item.dataset.bracketId===tournament.id);
+  const playerColors=tournamentPlayerColors(tournament);
+  canvases.forEach(canvas=>{
+    const layer=canvas.querySelector('.bracket-connectors');
+    layer.innerHTML='';
+    const canvasRect=canvas.getBoundingClientRect();
+    bracketTransitions(tournament.matches).forEach(transition=>{
+      const sourceMatch=[...canvas.querySelectorAll('[data-match-id]')].find(item=>item.dataset.matchId===transition.fromId);
+      const targetMatch=[...canvas.querySelectorAll('[data-match-id]')].find(item=>item.dataset.matchId===transition.toId);
+      const sourceRow=[...(sourceMatch?.querySelectorAll('[data-player-id]')||[])].find(item=>item.dataset.playerId===transition.playerId);
+      const targetRow=[...(targetMatch?.querySelectorAll('[data-player-id]')||[])].find(item=>item.dataset.playerId===transition.playerId);
+      if(!sourceRow||!targetRow) return;
+      const sourceRect=sourceRow.getBoundingClientRect(),targetRect=targetRow.getBoundingClientRect();
+      const startX=sourceRect.right-canvasRect.left+3,startY=sourceRect.top+sourceRect.height/2-canvasRect.top;
+      const endX=targetRect.left-canvasRect.left-9,endY=targetRect.top+targetRect.height/2-canvasRect.top;
+      if(endX<=startX) return;
+      const middleX=startX+(endX-startX)*.52;
+      const color=playerColors[transition.playerId]||'var(--green)';
+      addBracketConnector(layer,startX,startY-1,middleX-startX,2,`horizontal ${transition.type}`,color);
+      addBracketConnector(layer,middleX-1,Math.min(startY,endY),2,Math.abs(endY-startY),`vertical ${transition.type}`,color);
+      addBracketConnector(layer,middleX,endY-1,endX-middleX,2,`horizontal arrow ${transition.type}`,color);
+    });
+  });
+}
+function tournamentBracketLaneHtml(tournament,lane,title,playerColors){
+  const laneMatches=tournament.matches.filter(match=>lane==='finals'?['final','reset'].includes(match.stage):match.stage===lane);
+  if(!laneMatches.length) return '';
+  const sequences=[...new Set(laneMatches.map(match=>match.sequence))];
+  const maxRoundSize=Math.max(1,...sequences.map(sequence=>laneMatches.filter(match=>match.sequence===sequence).length));
+  return `<section class="bracket-lane ${lane}"><div class="bracket-lane-heading"><h4>${title}</h4><span>${laneMatches.length} матч${laneMatches.length===1?'':laneMatches.length<5?'а':'ей'}</span></div><div class="bracket-board"><div class="bracket-canvas" data-bracket-id="${escapeHtml(tournament.id)}" data-bracket-lane="${lane}" style="--bracket-height:${Math.max(170,maxRoundSize*145)}px"><div class="bracket-connectors" aria-hidden="true"></div><div class="bracket-rounds">${sequences.map(sequence=>{const matches=laneMatches.filter(match=>match.sequence===sequence),first=matches[0];return `<section class="bracket-round"><h3>${lane==='finals'?tournamentStageLabel(first.stage,first.roundNumber):`Раунд ${first.roundNumber}`}</h3><div class="bracket-match-list">${matches.map(match=>bracketMatchHtml(match,tournament.matches,playerColors)).join('')}</div></section>`}).join('')}</div></div></div></section>`;
 }
 function renderTournaments(){
   const list=document.querySelector('#tournament-list'),detail=document.querySelector('#tournament-detail');
@@ -118,14 +268,20 @@ function renderTournaments(){
   if(!me&&tournament.status==='registration') registrationAction='<button class="button primary" data-action="open-auth">Войти для участия</button>';
   else if(participant&&tournament.status==='registration') registrationAction=`<button class="button secondary" data-leave-tournament="${tournament.id}">Отменить участие</button>`;
   else if(me?.isPlayer&&registrationOpen) registrationAction=`<button class="button primary" data-join-tournament="${tournament.id}">Участвовать</button>`;
-  const participants=tournament.participants.map(item=>{const user=userById(item.userId);return `<div class="tournament-participant ${item.eliminated?'eliminated':''}"><span class="participant-seed">${item.seed?`#${item.seed}`:'•'}</span><button class="player-link" data-profile="${item.userId}">${publicName(user)}</button>${tournament.status==='active'||tournament.status==='completed'?`<span>${item.eliminated?'Выбыл':`${item.losses} пораж.`}</span>`:''}</div>`}).join('')||'<div class="empty">Пока никто не зарегистрировался</div>';
-  const sequences=[...new Set(tournament.matches.map(item=>item.sequence))];
-  const bracket=sequences.length?`<div class="bracket-board"><div class="bracket-rounds">${sequences.map(sequence=>{const matches=tournament.matches.filter(item=>item.sequence===sequence),first=matches[0];return `<section class="bracket-round"><h3>${tournamentStageLabel(first.stage,first.roundNumber)}</h3>${matches.map(bracketMatchHtml).join('')}</section>`}).join('')}</div></div>`:'<div class="empty bracket-empty">Сетка появится после запуска турнира администратором</div>';
+  const podiumPlace=userId=>tournament.podium?.first===userId?'1 место':tournament.podium?.second===userId?'2 место':tournament.podium?.third===userId?'3 место':'';
+  const participants=tournament.participants.map(item=>{const user=userById(item.userId),place=podiumPlace(item.userId);return `<div class="tournament-participant ${item.eliminated&&!place?'eliminated':''}"><span class="participant-seed">${item.seed?`#${item.seed}`:'•'}</span><button class="player-link" data-profile="${item.userId}">${publicName(user)}</button>${tournament.status==='active'||tournament.status==='completed'?`<span>${place||(item.eliminated?'Выбыл':`${item.losses} пораж.`)}</span>`:''}</div>`}).join('')||'<div class="empty">Пока никто не зарегистрировался</div>';
+  const hasBracket=tournament.matches.length>0;
+  const playerColors=tournamentPlayerColors(tournament);
+  const playerColorKey=tournament.participants.map(participant=>`<span><i style="--player-color:${playerColors[participant.userId]}"></i>${publicName(userById(participant.userId))}</span>`).join('');
+  const bracket=hasBracket?`<div class="bracket-legend"><span class="solid">Сплошная — победитель</span><span class="dashed">Пунктир — проигравший</span></div><div class="bracket-player-key">${playerColorKey}</div><div class="bracket-stack">${tournamentBracketLaneHtml(tournament,'upper','Верхняя сетка',playerColors)}${tournamentBracketLaneHtml(tournament,'lower','Нижняя сетка',playerColors)}${tournamentBracketLaneHtml(tournament,'finals','Финалы',playerColors)}</div>`:'<div class="empty bracket-empty">Сетка появится после запуска турнира администратором</div>';
+  const podium=tournament.podium;
+  const podiumHtml=podium?`<section class="tournament-podium"><div class="podium-heading"><p class="kicker">ИТОГИ ТУРНИРА</p><h3>Призовые места</h3></div><div class="podium-places"><div class="podium-place first"><span>1</span><div><strong>${publicName(userById(podium.first))}</strong><small>Победитель финала</small></div></div><div class="podium-place second"><span>2</span><div><strong>${publicName(userById(podium.second))}</strong><small>Финалист</small></div></div>${podium.third?`<div class="podium-place third"><span>3</span><div><strong>${publicName(userById(podium.third))}</strong><small>Третье место</small></div></div>`:''}</div></section>`:'';
   detail.innerHTML=`<section class="panel tournament-detail-panel">
     <div class="tournament-detail-heading"><div><p class="kicker">${escapeHtml(tournamentStatus(tournament)[0].toUpperCase())}</p><h2>${escapeHtml(tournament.name)}</h2><p>${escapeHtml(tournament.description||'Турнир по настольному теннису с двойным выбыванием.')}</p></div>${registrationAction}</div>
-    <div class="tournament-meta"><span><strong>${formatDateTime(tournament.startAt)}</strong>Начало</span><span><strong>${formatDateTime(tournament.registrationDeadline)}</strong>Регистрация до</span><span><strong>${tournament.participants.length} / ${tournament.maxPlayers}</strong>Участники</span>${tournament.championId?`<span><strong>${publicName(userById(tournament.championId))}</strong>Победитель</span>`:''}</div>
+    <div class="tournament-meta"><span><strong>${formatDateTime(tournament.startAt)}</strong>Начало</span><span><strong>${formatDateTime(tournament.registrationDeadline)}</strong>Регистрация до</span><span><strong>${tournament.participants.length} / ${tournament.maxPlayers}</strong>Участники</span>${tournament.championId?`<span><strong>${publicName(userById(tournament.championId))}</strong>Победитель</span>`:''}</div>${podiumHtml}
     <div class="tournament-layout"><aside><h3>Участники</h3><div class="participants-list">${participants}</div></aside><section class="tournament-bracket"><h3>Турнирная сетка</h3>${bracket}</section></div>
   </section>`;
+  if(hasBracket) requestAnimationFrame(()=>drawTournamentConnections(tournament));
 }
 
 function renderNotifications(){
@@ -159,6 +315,7 @@ function showView(name,updateHash=true){
   if(!document.querySelector(`[data-view="${name}"]`)) name='home';
   document.querySelectorAll('[data-view]').forEach(view=>view.hidden=view.dataset.view!==name);
   document.querySelectorAll('[data-route]').forEach(link=>link.classList.toggle('active',link.dataset.route===name));
+  if(name==='tournaments') requestAnimationFrame(()=>{const tournament=(db.tournaments||[]).find(item=>item.id===selectedTournamentId);if(tournament)drawTournamentConnections(tournament)});
   if(updateHash) history.pushState(null,'',`#${name}`); window.scrollTo({top:0,behavior:'smooth'});
 }
 
@@ -350,6 +507,8 @@ document.querySelector('#dispute-form').addEventListener('submit',async event=>{
 });
 
 window.addEventListener('hashchange',()=>showView((location.hash||'#home').slice(1),false));
+let bracketResizeTimer;
+window.addEventListener('resize',()=>{ clearTimeout(bracketResizeTimer);bracketResizeTimer=setTimeout(()=>{const tournament=(db.tournaments||[]).find(item=>item.id===selectedTournamentId);if(tournament)drawTournamentConnections(tournament)},120); });
 document.querySelectorAll('dialog').forEach(dialog=>dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()}));
 
 refreshState().then(()=>{render();if(db.authMessage)toast(db.authMessage)}).catch(error=>toast(`Не удалось подключиться к серверу: ${error.message}`));
