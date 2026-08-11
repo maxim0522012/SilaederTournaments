@@ -13,7 +13,7 @@ async function api(path,options={}){
   const data=await response.json().catch(()=>({})); if(!response.ok) throw new Error(data.error||'Ошибка сервера.'); return data;
 }
 async function refreshState(){ db=await api('/api/state'); ratingCache=calculateRatings(); }
-async function mutate(path,body){ await api(path,{method:'POST',body}); await refreshState(); render(); }
+async function mutate(path,body){ const result=await api(path,{method:'POST',body}); await refreshState(); render(); return result; }
 function currentUser(){ return db.users.find(user=>user.id===db.currentUserId) || null; }
 function userById(id){ return db.users.find(user=>user.id===id); }
 function displayName(user){ return user ? `${user.firstName} ${user.lastName}` : 'Неизвестный игрок'; }
@@ -378,8 +378,8 @@ function showQr(request){
   const opponent=userById(request.opponent), requester=userById(request.requester);
   document.querySelector('#request-qr').src=`/api/requests/${encodeURIComponent(request.id)}/qr?v=${Date.now()}`;
   document.querySelector('#request-summary').textContent=`${displayName(requester)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(opponent)}`;
-  const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=request.notified; button.textContent=request.notified?'Уведомление отправлено':'Отправить уведомление сопернику';
-  document.querySelector('#notification-status').textContent=request.notified?'Соперник увидит заявку при входе в аккаунт.':'Можно использовать любой из двух способов подтверждения.';
+  const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=request.notified; button.textContent=request.notified?'Уведомление отправлено':'Отправить на сайте и по email';
+  document.querySelector('#notification-status').textContent=request.notified?'Соперник увидит заявку при входе в аккаунт.':'Уведомление появится на сайте и придёт на почту из ЛК.';
   document.querySelector('#qr-dialog').showModal();
 }
 
@@ -418,7 +418,8 @@ function openProfile(id){
   const user=userById(id), stats=ratingCache[id]; if(!user||!stats) return;
   const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=db.matches.filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
   const rate=stats.games?Math.round(stats.wins/stats.games*100):0;
-  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
+  const email=user.email&&(currentUser()?.id===id||currentUser()?.role==='admin')?`<p>Почта ЛК: ${escapeHtml(user.email)}</p>`:'';
+  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
   document.querySelector('#profile-dialog').showModal();
 }
 
@@ -454,7 +455,11 @@ document.addEventListener('click',async event=>{
 
 document.querySelector('#send-notification').addEventListener('click',async event=>{
   const request=requestById(event.currentTarget.dataset.requestId); if(!request||request.status!=='pending') return;
-  try { await mutate(`/api/requests/${request.id}/notify`,{}); event.currentTarget.disabled=true; event.currentTarget.textContent='Уведомление отправлено'; document.querySelector('#notification-status').textContent='Соперник увидит заявку при входе в аккаунт.'; toast('Уведомление отправлено сопернику'); }
+  try {
+    const result=await mutate(`/api/requests/${request.id}/notify`,{}); event.currentTarget.disabled=true; event.currentTarget.textContent='Уведомление отправлено';
+    const messages={sent:'Уведомление отправлено на сайте и по email.',no_email:'Уведомление отправлено на сайте. В ЛК соперника не указана почта.',not_configured:'Уведомление отправлено на сайте. Отправка email не настроена на сервере.',failed:'Уведомление отправлено на сайте, но письмо доставить не удалось.'};
+    const message=messages[result.emailStatus]||'Уведомление отправлено на сайте.'; document.querySelector('#notification-status').textContent=message; toast(message);
+  }
   catch(error){ toast(error.message); }
 });
 document.querySelector('#accept-request').addEventListener('click',event=>acceptRequest(requestById(event.currentTarget.dataset.requestId)));
@@ -509,7 +514,5 @@ document.querySelector('#dispute-form').addEventListener('submit',async event=>{
 window.addEventListener('hashchange',()=>showView((location.hash||'#home').slice(1),false));
 let bracketResizeTimer;
 window.addEventListener('resize',()=>{ clearTimeout(bracketResizeTimer);bracketResizeTimer=setTimeout(()=>{const tournament=(db.tournaments||[]).find(item=>item.id===selectedTournamentId);if(tournament)drawTournamentConnections(tournament)},120); });
-document.querySelectorAll('dialog').forEach(dialog=>dialog.addEventListener('click',event=>{if(event.target===dialog)dialog.close()}));
-
 refreshState().then(()=>{render();if(db.authMessage)toast(db.authMessage)}).catch(error=>toast(`Не удалось подключиться к серверу: ${error.message}`));
 setInterval(async()=>{ try{await refreshState();render()}catch{} },15000);

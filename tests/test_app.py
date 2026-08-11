@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from werkzeug.security import generate_password_hash
 from flask_migrate import upgrade
@@ -59,12 +60,13 @@ class ServerFlowTest(unittest.TestCase):
         return self.post(client, "/api/login", {"login": login, "password": password})
 
     def test_oidc_refresh_preserves_inactive_status(self):
-        claims = {"first_name": "Ева", "last_name": "Новикова", "class_name": "", "role": "user", "email": ""}
+        claims = {"first_name": "Ева", "last_name": "Новикова", "class_name": "", "role": "user", "email": "eva.lk@example.org"}
         with db() as connection:
             connection.execute("UPDATE users SET status='inactive' WHERE id='u8'")
             update_user_from_oidc(connection, "u8", claims)
-            status = connection.execute("SELECT status FROM users WHERE id='u8'").fetchone()["status"]
-            self.assertEqual(status, "inactive")
+            updated = connection.execute("SELECT status,email FROM users WHERE id='u8'").fetchone()
+            self.assertEqual(updated["status"], "inactive")
+            self.assertEqual(updated["email"], "eva.lk@example.org")
 
     def test_match_request_notification_confirmation_and_local_qr(self):
         requester = app.test_client()
@@ -75,13 +77,22 @@ class ServerFlowTest(unittest.TestCase):
         request_id = created.get_json()["id"]
         confirmation_token = created.get_json()["token"]
 
+        with db() as connection:
+            connection.execute("UPDATE users SET email='eva.lk@example.org' WHERE id='u8'")
+
         qr = requester.get(f"/api/requests/{request_id}/qr")
         self.assertEqual(qr.status_code, 200)
         self.assertTrue(qr.content_type.startswith("image/svg+xml"))
         self.assertNotIn(b"api.qrserver.com", qr.data)
         self.assertEqual(qr.headers["Content-Location"], f"{QR_BASE_URL}/confirm/{confirmation_token}")
 
-        self.assertEqual(self.post(requester, f"/api/requests/{request_id}/notify").status_code, 200)
+        with patch("app.mail_configured", return_value=True), patch("app.send_match_notification_email") as send_email:
+            notified = self.post(requester, f"/api/requests/{request_id}/notify")
+            self.assertEqual(notified.status_code, 200)
+            self.assertTrue(notified.get_json()["emailSent"])
+            send_email.assert_called_once_with(
+                "eva.lk@example.org", "Максим Орлов", "Ева Новикова", 11, 7, confirmation_token,
+            )
         self.assertEqual(opponent.get(f"/confirm/{confirmation_token}").status_code, 200)
         with opponent.session_transaction() as confirmation_session:
             self.assertEqual(confirmation_session["confirmation_token"], confirmation_token)

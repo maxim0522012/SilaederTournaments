@@ -586,12 +586,7 @@ def mail_configured():
     return all(os.environ.get(key) for key in ("MAIL_HOST", "MAIL_FROM"))
 
 
-def send_link_email(recipient, raw_token):
-    message = EmailMessage()
-    message["Subject"] = "Подтверждение входа в рейтинг настольного тенниса"
-    message["From"] = os.environ["MAIL_FROM"]
-    message["To"] = recipient
-    message.set_content(f"Для привязки аккаунта ЛК Силаэдра перейдите по ссылке в течение 30 минут:\n\n{APP_URL}/auth/silaeder/link/{raw_token}\n")
+def send_email_message(message):
     host = os.environ["MAIL_HOST"]
     port = int(os.environ.get("MAIL_PORT", "587"))
     with smtplib.SMTP(host, port, timeout=15) as smtp:
@@ -600,6 +595,31 @@ def send_link_email(recipient, raw_token):
         if os.environ.get("MAIL_USERNAME"):
             smtp.login(os.environ["MAIL_USERNAME"], os.environ.get("MAIL_PASSWORD", ""))
         smtp.send_message(message)
+
+
+def send_link_email(recipient, raw_token):
+    message = EmailMessage()
+    message["Subject"] = "Подтверждение входа в рейтинг настольного тенниса"
+    message["From"] = os.environ["MAIL_FROM"]
+    message["To"] = recipient
+    message.set_content(f"Для привязки аккаунта ЛК Силаэдра перейдите по ссылке в течение 30 минут:\n\n{APP_URL}/auth/silaeder/link/{raw_token}\n")
+    send_email_message(message)
+
+
+def send_match_notification_email(recipient, requester_name, opponent_name, score_requester, score_opponent, token):
+    confirmation_url = f"{EXTERNAL_URL}/confirm/{token}"
+    message = EmailMessage()
+    message["Subject"] = "Подтвердите результат матча по настольному теннису"
+    message["From"] = os.environ["MAIL_FROM"]
+    message["To"] = recipient
+    message.set_content(
+        f"Здравствуйте, {opponent_name}!\n\n"
+        f"{requester_name} указал результат вашего матча: {score_requester}:{score_opponent}.\n"
+        "Перейдите по ссылке, чтобы подтвердить или отклонить результат:\n\n"
+        f"{confirmation_url}\n\n"
+        "Если вы не играли этот матч, отклоните заявку на сайте."
+    )
+    send_email_message(message)
 
 
 @app.get("/auth/silaeder/login")
@@ -933,8 +953,34 @@ def create_request(user):
 @require_user
 def notify_request(user,rid):
     with db() as connection:
-        result=connection.execute("UPDATE requests SET notified=1 WHERE id=? AND requester=? AND status='pending'",(rid,user["id"]))
-    return (jsonify(ok=True) if result.rowcount else (jsonify(error="Заявка не найдена."),404))
+        row=connection.execute(
+            """SELECT r.*,opponent.email AS opponent_email,opponent.first_name AS opponent_first_name,
+                      opponent.last_name AS opponent_last_name
+                 FROM requests r JOIN users opponent ON opponent.id=r.opponent
+                WHERE r.id=? AND r.requester=? AND r.status='pending'""",
+            (rid,user["id"]),
+        ).fetchone()
+        if not row:
+            return jsonify(error="Заявка не найдена."),404
+        connection.execute("UPDATE requests SET notified=1 WHERE id=?",(rid,))
+
+    email_status = "no_email"
+    if row["opponent_email"]:
+        if not mail_configured():
+            email_status = "not_configured"
+        else:
+            try:
+                send_match_notification_email(
+                    row["opponent_email"],
+                    f"{user['first_name']} {user['last_name']}",
+                    f"{row['opponent_first_name']} {row['opponent_last_name']}",
+                    row["score_requester"],row["score_opponent"],row["token"],
+                )
+                email_status = "sent"
+            except Exception:
+                app.logger.exception("Match notification email failed")
+                email_status = "failed"
+    return jsonify(ok=True,emailSent=email_status=="sent",emailStatus=email_status)
 
 
 @app.get("/api/requests/<rid>/qr")
