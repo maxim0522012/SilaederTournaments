@@ -26,10 +26,20 @@ class User(schema_db.Model):
     is_player = schema_db.Column(schema_db.Integer, nullable=False, server_default="1")
     created_at = schema_db.Column(schema_db.Integer, nullable=False)
     email = schema_db.Column(schema_db.Text)
+    telegram_username = schema_db.Column(schema_db.Text)
+    telegram_chat_id = schema_db.Column(schema_db.Text)
+    telegram_link_token = schema_db.Column(schema_db.Text)
 
     # SQLite cannot reflect expression indexes reliably. The case-insensitive
     # email index is therefore maintained explicitly by the Alembic migration.
     __table_args__ = (Index("idx_users_login", "login", unique=True),)
+
+
+class TelegramPollingState(schema_db.Model):
+    __tablename__ = "telegram_polling_state"
+
+    id = schema_db.Column(schema_db.Integer, primary_key=True)
+    update_offset = schema_db.Column(schema_db.BigInteger, nullable=False, server_default="0")
 
 
 class Match(schema_db.Model):

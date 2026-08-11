@@ -320,9 +320,10 @@ function showView(name,updateHash=true){
 }
 
 function openAuth(){
-  const button=document.querySelector('#oidc-login-button'),message=document.querySelector('#oidc-message');
+  const button=document.querySelector('#oidc-login-button'),message=document.querySelector('#oidc-message'),emailField=document.querySelector('#local-email-field');
   button.classList.toggle('disabled',!db.oidcEnabled); button.setAttribute('aria-disabled',String(!db.oidcEnabled));
   message.textContent=db.oidcEnabled?'':'Школьный вход будет доступен после настройки OIDC-клиента.';
+  emailField.hidden=!db.localLoginEnabled; emailField.querySelector('input').disabled=!db.localLoginEnabled;
   document.querySelector('#auth-dialog').showModal();
 }
 function openMatchForm(tournamentMatch=null){
@@ -378,8 +379,8 @@ function showQr(request){
   const opponent=userById(request.opponent), requester=userById(request.requester);
   document.querySelector('#request-qr').src=`/api/requests/${encodeURIComponent(request.id)}/qr?v=${Date.now()}`;
   document.querySelector('#request-summary').textContent=`${displayName(requester)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(opponent)}`;
-  const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=request.notified; button.textContent=request.notified?'Уведомление отправлено':'Отправить на сайте и по email';
-  document.querySelector('#notification-status').textContent=request.notified?'Соперник увидит заявку при входе в аккаунт.':'Уведомление появится на сайте и придёт на почту из ЛК.';
+  const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=request.notified; button.textContent=request.notified?'Уведомление отправлено':'Отправить на сайте, email и в Telegram';
+  document.querySelector('#notification-status').textContent=request.notified?'Соперник увидит заявку при входе в аккаунт.':'Уведомление появится на сайте, придёт на почту и в подключённый Telegram.';
   document.querySelector('#qr-dialog').showModal();
 }
 
@@ -419,7 +420,8 @@ function openProfile(id){
   const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=db.matches.filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
   const rate=stats.games?Math.round(stats.wins/stats.games*100):0;
   const email=user.email&&(currentUser()?.id===id||currentUser()?.role==='admin')?`<p>Почта ЛК: ${escapeHtml(user.email)}</p>`:'';
-  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
+  const telegram=currentUser()?.id===id?`<form id="telegram-profile-form" class="telegram-profile-form"><div><h3>Уведомления в Telegram</h3><p>${user.telegramConnected?`Подключено к @${escapeHtml(user.telegramUsername)}`:user.telegramUsername?`Ник @${escapeHtml(user.telegramUsername)} сохранён, осталось запустить бота.`:'Введите свой ник и один раз запустите школьного бота.'}</p></div><label>Ник Telegram<input name="username" value="${escapeHtml(user.telegramUsername||'')}" placeholder="@username" autocomplete="off" required></label><button class="button secondary" type="submit">${user.telegramConnected?'Переподключить':'Сохранить и подключить'}</button><p class="form-message" data-form-message></p></form>`:'';
+  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div>${telegram}<div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
   document.querySelector('#profile-dialog').showModal();
 }
 
@@ -457,8 +459,9 @@ document.querySelector('#send-notification').addEventListener('click',async even
   const request=requestById(event.currentTarget.dataset.requestId); if(!request||request.status!=='pending') return;
   try {
     const result=await mutate(`/api/requests/${request.id}/notify`,{}); event.currentTarget.disabled=true; event.currentTarget.textContent='Уведомление отправлено';
-    const messages={sent:'Уведомление отправлено на сайте и по email.',no_email:'Уведомление отправлено на сайте. В ЛК соперника не указана почта.',not_configured:'Уведомление отправлено на сайте. Отправка email не настроена на сервере.',failed:'Уведомление отправлено на сайте, но письмо доставить не удалось.'};
-    const message=messages[result.emailStatus]||'Уведомление отправлено на сайте.'; document.querySelector('#notification-status').textContent=message; toast(message);
+    const emailMessages={sent:'Email отправлен.',no_email:'Почта не указана.',not_configured:'Email не настроен на сервере.',failed:'Email доставить не удалось.'};
+    const telegramMessages={sent:'Telegram отправлен.',no_username:'Ник Telegram не указан.',not_connected:'Telegram ещё не подключён через бота.',not_configured:'Telegram-бот не настроен.',failed:'Сообщение в Telegram доставить не удалось.'};
+    const message=`Уведомление на сайте отправлено. ${emailMessages[result.emailStatus]||''} ${telegramMessages[result.telegramStatus]||''}`.trim(); document.querySelector('#notification-status').textContent=message; toast(message);
   }
   catch(error){ toast(error.message); }
 });
@@ -467,8 +470,23 @@ document.querySelector('#reject-request').addEventListener('click',event=>reject
 
 document.querySelector('#login-form').addEventListener('submit',async event=>{
   event.preventDefault(); const form=event.currentTarget,message=form.querySelector('[data-form-message]');
-  try { await api('/api/login',{method:'POST',body:{login:form.login.value.trim(),password:form.password.value}}); await refreshState(); form.reset(); message.textContent=''; document.querySelector('#auth-dialog').close(); render(); toast('Вход выполнен'); }
+  try { await api('/api/login',{method:'POST',body:{login:form.login.value.trim(),password:form.password.value,email:db.localLoginEnabled?form.email.value.trim():''}}); await refreshState(); form.reset(); message.textContent=''; document.querySelector('#auth-dialog').close(); render(); toast('Вход выполнен'); }
   catch(error){ message.textContent=error.message; }
+});
+
+document.addEventListener('submit',async event=>{
+  if(event.target.id!=='telegram-profile-form') return;
+  event.preventDefault(); const form=event.target,message=form.querySelector('[data-form-message]'),username=form.username.value.trim();
+  const botWindow=window.open('about:blank','_blank');
+  try{
+    const result=await api('/api/profile/telegram',{method:'POST',body:{username}}); await refreshState(); render();
+    if(result.link){
+      if(botWindow) botWindow.location=result.link;
+      else message.innerHTML=`Браузер заблокировал новое окно. <a href="${escapeHtml(result.link)}" target="_blank" rel="noopener">Открыть бота</a>`;
+      toast('Откройте бота и нажмите «Запустить»');
+    }
+    else { if(botWindow)botWindow.close(); message.textContent='Telegram-бот ещё не настроен на сервере.'; toast(message.textContent); }
+  }catch(error){ if(botWindow)botWindow.close(); message.textContent=error.message; }
 });
 
 document.querySelector('#match-form').addEventListener('submit',async event=>{

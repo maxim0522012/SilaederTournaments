@@ -3,6 +3,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import secrets
 import smtplib
 import sqlite3
@@ -16,6 +17,7 @@ from urllib.parse import urlencode, urlsplit
 
 import qrcode
 import qrcode.image.svg
+import requests as http_requests
 from authlib.integrations.flask_client import OAuth
 from dotenv import load_dotenv
 from flask import Flask, jsonify, redirect, request, send_file, send_from_directory, session
@@ -42,6 +44,9 @@ COOKIE_SECURE_SETTING = os.environ.get("SESSION_COOKIE_SECURE", "").strip().lowe
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
 ALLOW_LOCAL_USER_LOGIN = os.environ.get("ALLOW_LOCAL_USER_LOGIN", "false").lower() == "true"
+TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
+TELEGRAM_BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@").rstrip(".")
+TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_USERNAME)
 OIDC_ISSUER = os.environ.get("CRM_OIDC_ISSUER", "https://lk.silaeder.ru").rstrip("/")
 OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and all(
     os.environ.get(key) for key in ("SECRET_KEY", "CRM_OIDC_CLIENT_ID", "CRM_OIDC_CLIENT_SECRET")
@@ -108,6 +113,25 @@ def clean_text(value, field, max_length, required=True):
     if len(text) > max_length:
         raise ValueError(f"Поле «{field}» не должно быть длиннее {max_length} символов.")
     return text
+
+
+def clean_email(value):
+    email = str(value or "").strip().lower()
+    if not email:
+        return ""
+    if len(email) > 254 or email.count("@") != 1 or any(character.isspace() or ord(character) < 32 for character in email):
+        raise ValueError("Укажите корректный адрес электронной почты.")
+    local_part, domain = email.split("@", 1)
+    if not local_part or not domain or domain.startswith(".") or domain.endswith("."):
+        raise ValueError("Укажите корректный адрес электронной почты.")
+    return email
+
+
+def clean_telegram_username(value):
+    username = str(value or "").strip().lstrip("@").lower()
+    if not re.fullmatch(r"[a-z][a-z0-9_]{4,31}", username):
+        raise ValueError("Ник Telegram должен начинаться с латинской буквы и содержать 5–32 буквы, цифры или знак подчёркивания.")
+    return username
 
 
 def login_key(login):
@@ -253,6 +277,8 @@ def serialize_user(row, viewer):
     if can_see_full:
         data.update(className=row["class_name"], login=row["login"],
                     email=row["email"] if "email" in row.keys() else "",
+                    telegramUsername=row["telegram_username"] or "",
+                    telegramConnected=bool(row["telegram_chat_id"]),
                     role=row["role"], createdAt=row["created_at"])
     return data
 
@@ -541,6 +567,7 @@ def state():
     return jsonify(users=users, matches=matches_json, requests=requests_json, tournaments=tournaments,
                    currentUserId=viewer["id"] if viewer else None,
                    oidcEnabled=OIDC_ENABLED, oidcSession=bool(session.get("oidc_login")),
+                   localLoginEnabled=ALLOW_LOCAL_USER_LOGIN, telegramEnabled=TELEGRAM_ENABLED,
                    csrfToken=csrf_token, authMessage=session.pop("auth_message", None))
 
 
@@ -620,6 +647,86 @@ def send_match_notification_email(recipient, requester_name, opponent_name, scor
         "Если вы не играли этот матч, отклоните заявку на сайте."
     )
     send_email_message(message)
+
+
+def telegram_api_call(method, payload=None, timeout=15):
+    response = http_requests.post(
+        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+        json=payload or {},
+        timeout=timeout,
+    )
+    response.raise_for_status()
+    result = response.json()
+    if not result.get("ok"):
+        raise RuntimeError(result.get("description") or "Telegram Bot API отклонил запрос.")
+    return result.get("result")
+
+
+def send_telegram_message(chat_id, text):
+    telegram_api_call(
+        "sendMessage",
+        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
+    )
+
+
+def process_telegram_update(update):
+    message = update.get("message") or {}
+    sender = message.get("from") or {}
+    chat = message.get("chat") or {}
+    text = str(message.get("text") or "").strip()
+    chat_id = str(chat.get("id") or "")
+    username = str(sender.get("username") or "").strip().lower()
+    if not chat_id or not text.startswith("/start"):
+        return False
+    parts = text.split(maxsplit=1)
+    token = parts[1].strip() if len(parts) == 2 else ""
+    with db() as connection:
+        user = connection.execute(
+            "SELECT id,first_name,telegram_username FROM users WHERE telegram_link_token=?", (token,)
+        ).fetchone() if token else None
+        if not user:
+            connected = connection.execute(
+                "SELECT first_name FROM users WHERE telegram_chat_id=? AND telegram_username=?",
+                (chat_id, username),
+            ).fetchone() if username else None
+            if connected:
+                reply = f"Telegram уже подключён, {connected['first_name']}. Уведомления будут приходить в этот чат."
+            else:
+                reply = "Ссылка подключения недействительна. Создайте новую ссылку в профиле сайта."
+        elif not username or username != user["telegram_username"]:
+            reply = "Ник Telegram не совпадает с указанным на сайте. Проверьте ник и повторите подключение."
+        else:
+            connection.execute(
+                "UPDATE users SET telegram_chat_id=?,telegram_link_token=NULL WHERE id=?", (chat_id, user["id"])
+            )
+            reply = f"Готово, {user['first_name']}! Уведомления о матчах будут приходить в этот чат."
+    send_telegram_message(chat_id, reply)
+    return True
+
+
+@app.post("/api/profile/telegram")
+@require_user
+def save_telegram_profile(user):
+    data = request.get_json(silent=True) or {}
+    try:
+        username = clean_telegram_username(data.get("username"))
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    try:
+        with db() as connection:
+            current = connection.execute(
+                "SELECT telegram_username,telegram_chat_id,telegram_link_token FROM users WHERE id=?", (user["id"],)
+            ).fetchone()
+            changed = current["telegram_username"] != username
+            link_token = current["telegram_link_token"] or secrets.token_urlsafe(18)
+            connection.execute(
+                "UPDATE users SET telegram_username=?,telegram_chat_id=?,telegram_link_token=? WHERE id=?",
+                (username, None if changed else current["telegram_chat_id"], link_token, user["id"]),
+            )
+    except sqlite3.IntegrityError:
+        return jsonify(error="Этот ник Telegram уже указан в другом аккаунте."), 409
+    link = f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={link_token}" if TELEGRAM_ENABLED else None
+    return jsonify(ok=True,link=link,telegramEnabled=TELEGRAM_ENABLED)
 
 
 @app.get("/auth/silaeder/login")
@@ -748,6 +855,15 @@ def login():
         return jsonify(error="Аккаунт недоступен. Обратитесь к администратору."),403
     if OIDC_ENABLED and user["role"] != "admin" and not ALLOW_LOCAL_USER_LOGIN:
         return jsonify(error="Для учеников и учителей используйте вход через ЛК Силаэдра."),403
+    if ALLOW_LOCAL_USER_LOGIN and user["role"] != "admin" and data.get("email"):
+        try:
+            email = clean_email(data.get("email"))
+            with db() as connection:
+                connection.execute("UPDATE users SET email=? WHERE id=?",(email,user["id"]))
+        except ValueError as error:
+            return jsonify(error=str(error)),400
+        except sqlite3.IntegrityError:
+            return jsonify(error="Эта почта уже используется другим аккаунтом."),409
     session.clear()
     session.permanent = True
     session["user_id"]=user["id"]
@@ -955,7 +1071,8 @@ def notify_request(user,rid):
     with db() as connection:
         row=connection.execute(
             """SELECT r.*,opponent.email AS opponent_email,opponent.first_name AS opponent_first_name,
-                      opponent.last_name AS opponent_last_name
+                      opponent.last_name AS opponent_last_name,opponent.telegram_username AS opponent_telegram_username,
+                      opponent.telegram_chat_id AS opponent_telegram_chat_id
                  FROM requests r JOIN users opponent ON opponent.id=r.opponent
                 WHERE r.id=? AND r.requester=? AND r.status='pending'""",
             (rid,user["id"]),
@@ -980,7 +1097,26 @@ def notify_request(user,rid):
             except Exception:
                 app.logger.exception("Match notification email failed")
                 email_status = "failed"
-    return jsonify(ok=True,emailSent=email_status=="sent",emailStatus=email_status)
+    telegram_status = "no_username"
+    if row["opponent_telegram_username"]:
+        if not TELEGRAM_ENABLED:
+            telegram_status = "not_configured"
+        elif not row["opponent_telegram_chat_id"]:
+            telegram_status = "not_connected"
+        else:
+            try:
+                send_telegram_message(
+                    row["opponent_telegram_chat_id"],
+                    f"Новый результат матча\n\n{user['first_name']} {user['last_name']} указал счёт "
+                    f"{row['score_requester']}:{row['score_opponent']}.\n\n"
+                    f"Подтвердить или отклонить: {EXTERNAL_URL}/confirm/{row['token']}",
+                )
+                telegram_status = "sent"
+            except Exception:
+                app.logger.exception("Match notification Telegram delivery failed")
+                telegram_status = "failed"
+    return jsonify(ok=True,emailSent=email_status=="sent",emailStatus=email_status,
+                   telegramSent=telegram_status=="sent",telegramStatus=telegram_status)
 
 
 @app.get("/api/requests/<rid>/qr")
@@ -1103,6 +1239,48 @@ def seed_local_demo_command():
     """Create local-only student accounts with a shared development password."""
     seed_local_demo_users()
     print("Создано 12 локальных учеников: student01–student12, пароль 123456")
+
+
+@app.cli.command("telegram-polling")
+def telegram_polling_command():
+    """Continuously receive Telegram updates without a public webhook."""
+    if not TELEGRAM_ENABLED:
+        raise RuntimeError("Задайте TELEGRAM_BOT_TOKEN и TELEGRAM_BOT_USERNAME.")
+    telegram_api_call("deleteWebhook", {"drop_pending_updates": False})
+    with db() as connection:
+        state = connection.execute(
+            "SELECT update_offset FROM telegram_polling_state WHERE id=1"
+        ).fetchone()
+        offset = int(state["update_offset"]) if state else 0
+    print(f"Telegram polling запущен для @{TELEGRAM_BOT_USERNAME}")
+    retry_delay = 1
+    while True:
+        try:
+            updates = telegram_api_call(
+                "getUpdates",
+                {"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
+                timeout=40,
+            ) or []
+            for update in updates:
+                update_id = int(update.get("update_id", -1))
+                if update_id < offset:
+                    continue
+                process_telegram_update(update)
+                offset = update_id + 1
+                with db() as connection:
+                    connection.execute(
+                        "INSERT INTO telegram_polling_state(id,update_offset) VALUES(1,?) "
+                        "ON CONFLICT(id) DO UPDATE SET update_offset=excluded.update_offset",
+                        (offset,),
+                    )
+            retry_delay = 1
+        except KeyboardInterrupt:
+            print("Telegram polling остановлен")
+            break
+        except Exception:
+            app.logger.exception("Telegram polling failed; retrying")
+            time.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 30)
 
 if __name__ == "__main__":
     with app.app_context():

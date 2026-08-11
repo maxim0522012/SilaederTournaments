@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f8f6">
   <title>Школьный рейтинг настольного тенниса</title>
   <link rel="icon" href="/static/school-logo.jfif">
-  <link rel="stylesheet" href="/styles.css?v=20260811-7">
+  <link rel="stylesheet" href="/styles.css?v=20260811-9">
 </head>
 <body>
   <header class="site-header">
@@ -91,6 +91,7 @@
     <form id="login-form">
       <label>Логин<input name="login" autocomplete="username" required></label>
       <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
+      <label id="local-email-field" hidden>Почта для уведомлений<input name="email" type="email" autocomplete="email" placeholder="example@school.ru"><small>Только для локального тестового аккаунта</small></label>
       <p class="form-message" data-form-message></p>
       <button class="button primary wide">Войти</button>
     </form>
@@ -139,7 +140,7 @@
     <p class="modal-description">Соперник должен отсканировать код и войти в свой аккаунт.</p>
     <div class="qr-box"><img id="request-qr" width="220" height="220" alt="QR-код для подтверждения матча"></div>
     <div class="request-summary" id="request-summary"></div>
-    <button class="button primary wide" id="send-notification">Отправить на сайте и по email</button>
+    <button class="button primary wide" id="send-notification">Отправить на сайте, email и в Telegram</button>
     <p class="qr-note" id="notification-status">Можно использовать любой из двух способов подтверждения.</p>
   </dialog>
 
@@ -163,6 +164,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20260811-9"></script>
+  <script src="/app.js?v=20260811-11"></script>
 </body>
 </html>
