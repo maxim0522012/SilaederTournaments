@@ -12,7 +12,7 @@ os.environ["ADMIN_PASSWORD"] = "test-admin-password-123"
 os.environ["CRM_OIDC_ENABLED"] = "false"
 os.environ["SEED_DEMO_DATA"] = "false"
 
-from app import ROOT, app, clear_login_failures, db, seed_database, update_user_from_oidc  # noqa: E402
+from app import QR_BASE_URL, ROOT, app, clear_login_failures, db, seed_database, update_user_from_oidc  # noqa: E402
 
 with app.app_context():
     upgrade(directory=str(ROOT / "migrations"))
@@ -73,13 +73,18 @@ class ServerFlowTest(unittest.TestCase):
         created = self.post(requester, "/api/requests", {"opponent": "u8", "scoreRequester": 11, "scoreOpponent": 7})
         self.assertEqual(created.status_code, 200)
         request_id = created.get_json()["id"]
+        confirmation_token = created.get_json()["token"]
 
         qr = requester.get(f"/api/requests/{request_id}/qr")
         self.assertEqual(qr.status_code, 200)
         self.assertTrue(qr.content_type.startswith("image/svg+xml"))
         self.assertNotIn(b"api.qrserver.com", qr.data)
+        self.assertEqual(qr.headers["Content-Location"], f"{QR_BASE_URL}/confirm/{confirmation_token}")
 
         self.assertEqual(self.post(requester, f"/api/requests/{request_id}/notify").status_code, 200)
+        self.assertEqual(opponent.get(f"/confirm/{confirmation_token}").status_code, 200)
+        with opponent.session_transaction() as confirmation_session:
+            self.assertEqual(confirmation_session["confirmation_token"], confirmation_token)
         self.assertEqual(self.login(opponent, "eva", "eva-password-123").status_code, 200)
         opponent_state = opponent.get("/api/state").get_json()
         item = next(item for item in opponent_state["requests"] if item["id"] == request_id)

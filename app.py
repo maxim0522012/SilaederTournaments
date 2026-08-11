@@ -37,7 +37,8 @@ if os.environ.get("TRUST_PROXY_HEADERS", "false").lower() == "true":
 app.secret_key = os.environ.get("SECRET_KEY") or secrets.token_hex(32)
 EXTERNAL_URL = os.environ.get("EXTERNAL_URL", os.environ.get("APP_URL", "http://127.0.0.1:5000")).rstrip("/")
 APP_URL = EXTERNAL_URL
-QR_BASE_URL = os.environ.get("QR_BASE_URL", EXTERNAL_URL).rstrip("/")
+QR_BASE_URL = (os.environ.get("QR_BASE_URL") or EXTERNAL_URL).rstrip("/")
+COOKIE_SECURE_SETTING = os.environ.get("SESSION_COOKIE_SECURE", "").strip().lower()
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
 ALLOW_LOCAL_USER_LOGIN = os.environ.get("ALLOW_LOCAL_USER_LOGIN", "false").lower() == "true"
@@ -52,7 +53,7 @@ app.config.update(
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
     SESSION_COOKIE_HTTPONLY=True,
     SESSION_COOKIE_SAMESITE="Lax",
-    SESSION_COOKIE_SECURE=APP_URL.startswith("https://"),
+    SESSION_COOKIE_SECURE=(COOKIE_SECURE_SETTING == "true" if COOKIE_SECURE_SETTING else APP_URL.startswith("https://")),
     SESSION_COOKIE_NAME="tennis_session",
     SESSION_REFRESH_EACH_REQUEST=False,
     SQLALCHEMY_DATABASE_URI=f"sqlite:///{DB_PATH.resolve().as_posix()}",
@@ -129,6 +130,13 @@ def record_login_failure(key):
 def clear_login_failures(key):
     with login_failures_lock:
         login_failures.pop(key, None)
+
+
+def confirmation_return_path():
+    token = session.get("confirmation_token", "")
+    if token and len(token) <= 128 and all(character.isalnum() or character in "-_" for character in token):
+        return f"/confirm/{token}"
+    return "/#home"
 
 
 def seed_database():
@@ -399,6 +407,8 @@ def serialize_tournaments(connection):
 @app.get("/")
 @app.get("/confirm/<token>")
 def index(token=None):
+    if token and len(token) <= 128 and all(character.isalnum() or character in "-_" for character in token):
+        session["confirmation_token"] = token
     return send_from_directory(ROOT, "index.html", max_age=0)
 
 
@@ -608,15 +618,16 @@ def silaeder_callback():
                 connection.execute("INSERT INTO users(id,first_name,last_name,class_name,login,password_hash,role,status,is_player,created_at,email) VALUES(?,?,?,?,?,?,?,?,?,?,?)",
                                    (user_id, claims["first_name"], claims["last_name"], claims["class_name"], login, generate_password_hash(secrets.token_urlsafe(32)), claims["role"], "active", 1, now_ms(), claims["email"] or None))
                 connection.execute("INSERT INTO oidc_identities VALUES(?,?,?,?)", (claims["issuer"], claims["subject"], user_id, now_ms()))
+        return_path = confirmation_return_path()
         session.clear()
         session.permanent = True
         session["user_id"] = user_id
         session["oidc_login"] = True
-        return redirect("/#home")
+        return redirect(return_path)
     except Exception as error:
         app.logger.exception("OIDC login failed")
         session["auth_message"] = "Не удалось выполнить школьный вход. Попробуйте ещё раз или обратитесь к администратору."
-        return redirect("/#home")
+        return redirect(confirmation_return_path())
 
 
 @app.get("/auth/silaeder/link/<raw_token>")
@@ -631,12 +642,13 @@ def silaeder_link(raw_token):
         connection.execute("INSERT OR IGNORE INTO oidc_identities VALUES(?,?,?,?)", (link["issuer"], link["subject"], link["user_id"], now_ms()))
         update_user_from_oidc(connection, link["user_id"], claims)
         connection.execute("DELETE FROM account_link_tokens WHERE token_hash=?", (token_hash,))
+    return_path = confirmation_return_path()
     session.clear()
     session.permanent = True
     session["user_id"] = link["user_id"]
     session["oidc_login"] = True
     session["auth_message"] = "Аккаунт ЛК Силаэдра успешно привязан."
-    return redirect("/#home")
+    return redirect(return_path)
 
 
 @app.post("/auth/silaeder/logout")
@@ -908,7 +920,9 @@ def request_qr(user, rid):
     output = io.BytesIO()
     image.save(output)
     output.seek(0)
-    return send_file(output, mimetype="image/svg+xml", max_age=0)
+    response = send_file(output, mimetype="image/svg+xml", max_age=0)
+    response.headers["Content-Location"] = confirmation_url
+    return response
 
 
 @app.post("/api/requests/<rid>/<action>")
