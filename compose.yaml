@@ -25,6 +25,7 @@ services:
       - sh
       - -c
       - |
+        set -e
         if [ ! -f "$${TENNIS_DB_PATH}" ]; then
           if [ -f /legacy-data/tennis.db ]; then
             cp /legacy-data/tennis.db "$${TENNIS_DB_PATH}"

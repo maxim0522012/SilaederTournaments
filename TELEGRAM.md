@@ -1,38 +1,55 @@
 # Уведомления в Telegram без webhook
 
-Telegram-бот не может начать диалог с человеком только по введённому нику. Игрок указывает ник в профиле сайта, открывает персональную ссылку на бота и один раз нажимает «Запустить». После этого отдельный процесс получает команды через long polling и сохраняет `chat_id` игрока.
+Игрок указывает ник в профиле сайта, открывает персональную ссылку на бота и один раз нажимает «Запустить». Отдельный процесс получает команды через long polling и сохраняет `chat_id` игрока.
 
 ## Настройка
 
-1. Создайте бота через [@BotFather](https://t.me/BotFather) и скопируйте новый токен.
-2. Добавьте только в серверный `.env`:
+Создайте бота через [@BotFather](https://t.me/BotFather), затем добавьте настройки только в серверный `.env`:
 
 ```dotenv
-TELEGRAM_BOT_TOKEN=8731770216:AAFpliJD4ubW7bF1MpnJZqL7itwoWnqU-2M
-TELEGRAM_BOT_USERNAME=silaeder_tournament_bot
+TELEGRAM_BOT_TOKEN=новый_токен_из_BotFather
+TELEGRAM_BOT_USERNAME=имя_бота_без_символа_собачки
 ```
 
-Токен нельзя добавлять в исходный код, документацию или отправлять другим людям.
+Токен нельзя добавлять в исходный код или документацию.
 
-3. Пересоберите и запустите контейнеры:
+## SOCKS5-прокси
+
+Если прямой доступ к Telegram недоступен, добавьте в `.env`:
+
+```dotenv
+TELEGRAM_PROXY_URL=socks5h://127.0.0.1:1080
+```
+
+Прокси с авторизацией:
+
+```dotenv
+TELEGRAM_PROXY_URL=socks5h://username:password@proxy.example.org:1080
+```
+
+Рекомендуется `socks5h://`: в этом режиме имя `api.telegram.org` также разрешается через прокси. Поддерживаются только схемы `socks5://` и `socks5h://`. Специальные символы в логине и пароле нужно записывать в URL-кодировке.
+
+После изменения настроек установите зависимости и перезапустите процессы:
+
+```powershell
+.\.venv\Scripts\python.exe -m pip install -r requirements.txt
+```
+
+Без Docker запустите сайт и polling в отдельных терминалах:
+
+```powershell
+.\.venv\Scripts\python.exe app.py
+.\.venv\Scripts\python.exe -m flask --app app telegram-polling
+```
+
+С Docker достаточно пересобрать контейнеры:
 
 ```powershell
 docker compose up -d --build
-```
-
-Docker Compose автоматически запустит сайт и отдельный процесс `telegram-poller`. Публичный webhook, HTTPS-адрес для Telegram и `TELEGRAM_WEBHOOK_SECRET` больше не нужны.
-
-Проверить работу процесса:
-
-```powershell
 docker compose logs -f telegram-poller
 ```
 
-Для запуска без Docker используйте отдельный терминал:
-
-```powershell
-.venv\Scripts\python.exe -m flask --app app telegram-polling
-```
+Публичный webhook и `TELEGRAM_WEBHOOK_SECRET` не нужны.
 
 ## Подключение игрока
 
@@ -40,4 +57,4 @@ docker compose logs -f telegram-poller
 2. Вводит ник Telegram и нажимает «Сохранить и подключить».
 3. В открывшемся боте нажимает «Запустить».
 
-После привязки уведомление о заявке на результат матча отправляется одновременно на сайте, по email и в Telegram. Если Telegram не настроен или не подключён, заявка и остальные способы уведомления продолжают работать.
+После привязки уведомления отправляются на сайте, по email и в Telegram. Если Telegram недоступен, заявка и остальные способы уведомления продолжают работать.

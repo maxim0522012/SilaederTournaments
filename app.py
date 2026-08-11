@@ -46,6 +46,7 @@ SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
 ALLOW_LOCAL_USER_LOGIN = os.environ.get("ALLOW_LOCAL_USER_LOGIN", "false").lower() == "true"
 TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
 TELEGRAM_BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@").rstrip(".")
+TELEGRAM_PROXY_URL = os.environ.get("TELEGRAM_PROXY_URL", "").strip()
 TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_USERNAME)
 OIDC_ISSUER = os.environ.get("CRM_OIDC_ISSUER", "https://lk.silaeder.ru").rstrip("/")
 OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and all(
@@ -132,6 +133,19 @@ def clean_telegram_username(value):
     if not re.fullmatch(r"[a-z][a-z0-9_]{4,31}", username):
         raise ValueError("Ник Telegram должен начинаться с латинской буквы и содержать 5–32 буквы, цифры или знак подчёркивания.")
     return username
+
+
+def telegram_proxy_settings():
+    if not TELEGRAM_PROXY_URL:
+        return None
+    try:
+        parsed = urlsplit(TELEGRAM_PROXY_URL)
+        valid = parsed.scheme.lower() in {"socks5", "socks5h"} and parsed.hostname and parsed.port
+    except ValueError:
+        valid = False
+    if not valid:
+        raise RuntimeError("TELEGRAM_PROXY_URL должен иметь вид socks5h://host:port или socks5://host:port.")
+    return {"http": TELEGRAM_PROXY_URL, "https": TELEGRAM_PROXY_URL}
 
 
 def login_key(login):
@@ -275,10 +289,12 @@ def serialize_user(row, viewer):
     data = {"id": row["id"], "firstName": row["first_name"], "lastName": row["last_name"],
             "status": row["status"], "isPlayer": bool(row["is_player"])}
     if can_see_full:
+        telegram_username = row["telegram_username"] if "telegram_username" in row.keys() else ""
+        telegram_chat_id = row["telegram_chat_id"] if "telegram_chat_id" in row.keys() else None
         data.update(className=row["class_name"], login=row["login"],
                     email=row["email"] if "email" in row.keys() else "",
-                    telegramUsername=row["telegram_username"] or "",
-                    telegramConnected=bool(row["telegram_chat_id"]),
+                    telegramUsername=telegram_username or "",
+                    telegramConnected=bool(telegram_chat_id),
                     role=row["role"], createdAt=row["created_at"])
     return data
 
@@ -650,13 +666,17 @@ def send_match_notification_email(recipient, requester_name, opponent_name, scor
 
 
 def telegram_api_call(method, payload=None, timeout=15):
-    response = http_requests.post(
-        f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
-        json=payload or {},
-        timeout=timeout,
-    )
-    response.raise_for_status()
-    result = response.json()
+    try:
+        response = http_requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
+            json=payload or {},
+            timeout=timeout,
+            proxies=telegram_proxy_settings(),
+        )
+        response.raise_for_status()
+        result = response.json()
+    except (http_requests.RequestException, ValueError) as error:
+        raise RuntimeError(f"Не удалось выполнить запрос к Telegram Bot API ({type(error).__name__}).") from None
     if not result.get("ok"):
         raise RuntimeError(result.get("description") or "Telegram Bot API отклонил запрос.")
     return result.get("result")

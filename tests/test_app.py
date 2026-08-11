@@ -1,10 +1,11 @@
 import os
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from werkzeug.security import generate_password_hash
 from flask_migrate import upgrade
+from requests import ConnectionError as RequestsConnectionError
 
 TEMP_DIR = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
 os.environ["TENNIS_DB_PATH"] = os.path.join(TEMP_DIR.name, "test.db")
@@ -15,7 +16,7 @@ os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["ALLOW_LOCAL_USER_LOGIN"] = "true"
 
 from app import (QR_BASE_URL, ROOT, app, clear_login_failures, db, process_telegram_update,
-                 seed_database, update_user_from_oidc)  # noqa: E402
+                 seed_database, telegram_api_call, update_user_from_oidc)  # noqa: E402
 
 with app.app_context():
     upgrade(directory=str(ROOT / "migrations"))
@@ -160,6 +161,26 @@ class ServerFlowTest(unittest.TestCase):
             ).fetchone()["telegram_chat_id"]
             self.assertEqual(offset, 78)
             self.assertEqual(chat_id, "987654")
+
+    def test_telegram_api_supports_socks5_proxy_without_leaking_credentials(self):
+        proxy_url = "socks5h://proxy-user:proxy-password@127.0.0.1:1080"
+        response = Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"ok": True, "result": {"id": 1}}
+
+        with patch("app.TELEGRAM_PROXY_URL", proxy_url), \
+                patch("app.http_requests.post", return_value=response) as post:
+            self.assertEqual(telegram_api_call("getMe"), {"id": 1})
+            self.assertEqual(post.call_args.kwargs["proxies"], {
+                "http": proxy_url,
+                "https": proxy_url,
+            })
+
+        with patch("app.TELEGRAM_PROXY_URL", proxy_url), \
+                patch("app.http_requests.post", side_effect=RequestsConnectionError(proxy_url)):
+            with self.assertRaises(RuntimeError) as raised:
+                telegram_api_call("getMe")
+            self.assertNotIn("proxy-password", str(raised.exception))
 
     def test_match_request_notification_confirmation_and_local_qr(self):
         requester = app.test_client()
