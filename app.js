@@ -365,15 +365,6 @@ function selectOpponent(id){
 }
 
 function validScore(a,b){ const high=Math.max(a,b),low=Math.min(a,b); if(a===b||high<11) return false; if(low<10) return high===11; return high-low===2; }
-function validateDailyRules(playerOne,playerTwo){
-  const today=dateKey(Date.now()); const todays=db.matches.filter(m=>m.active&&dateKey(m.createdAt)===today);
-  const duplicate=todays.some(m=>[m.playerOne,m.playerTwo].sort().join('|')===[playerOne,playerTwo].sort().join('|'));
-  if(duplicate) return 'Эта пара уже сыграла рейтинговый матч сегодня.';
-  const pending=db.requests.some(r=>r.status==='pending'&&dateKey(r.createdAt)===today&&[r.requester,r.opponent].sort().join('|')===[playerOne,playerTwo].sort().join('|'));
-  if(pending) return 'Для этой пары уже есть заявка на результат сегодня.';
-  return '';
-}
-
 function requestById(id){ return db.requests.find(request=>request.id===id); }
 function showQr(request){
   const opponent=userById(request.opponent), requester=userById(request.requester);
@@ -410,11 +401,6 @@ async function rejectRequest(request){
   try { await mutate(`/api/requests/${request.id}/reject`,{}); if(document.querySelector('#confirm-dialog').open) document.querySelector('#confirm-dialog').close(); const target=request.tournamentMatchId?'tournaments':'home';history.replaceState(null,'',`#${target}`);showView(target,false);toast('Заявка отклонена'); }
   catch(error){ toast(error.message); }
 }
-function validateAcceptedPair(playerOne,playerTwo){
-  const today=dateKey(Date.now());
-  return db.matches.some(m=>m.active&&dateKey(m.createdAt)===today&&[m.playerOne,m.playerTwo].sort().join('|')===[playerOne,playerTwo].sort().join('|'))?'Эта пара уже имеет подтверждённый матч сегодня.':'';
-}
-
 function openProfile(id){
   const user=userById(id), stats=ratingCache[id]; if(!user||!stats) return;
   const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=db.matches.filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
@@ -456,14 +442,18 @@ document.addEventListener('click',async event=>{
 });
 
 document.querySelector('#send-notification').addEventListener('click',async event=>{
-  const request=requestById(event.currentTarget.dataset.requestId); if(!request||request.status!=='pending') return;
+  const button=event.currentTarget;
+  const request=requestById(button.dataset.requestId);
+  if(!request||request.status!=='pending'||button.disabled||button.dataset.sending==='true') return;
+  button.dataset.sending='true'; button.disabled=true; button.textContent='Отправляем…';
   try {
-    const result=await mutate(`/api/requests/${request.id}/notify`,{}); event.currentTarget.disabled=true; event.currentTarget.textContent='Уведомление отправлено';
+    const result=await mutate(`/api/requests/${request.id}/notify`,{}); button.textContent='Уведомление отправлено';
     const emailMessages={sent:'Email отправлен.',no_email:'Почта не указана.',not_configured:'Email не настроен на сервере.',failed:'Email доставить не удалось.'};
     const telegramMessages={sent:'Telegram отправлен.',no_username:'Ник Telegram не указан.',not_connected:'Telegram ещё не подключён через бота.',not_configured:'Telegram-бот не настроен.',failed:'Сообщение в Telegram доставить не удалось.'};
     const message=`Уведомление на сайте отправлено. ${emailMessages[result.emailStatus]||''} ${telegramMessages[result.telegramStatus]||''}`.trim(); document.querySelector('#notification-status').textContent=message; toast(message);
   }
-  catch(error){ toast(error.message); }
+  catch(error){ button.disabled=false; button.textContent='Отправить на сайте, email и в Telegram'; toast(error.message); }
+  finally { delete button.dataset.sending; }
 });
 document.querySelector('#accept-request').addEventListener('click',event=>acceptRequest(requestById(event.currentTarget.dataset.requestId)));
 document.querySelector('#reject-request').addEventListener('click',event=>rejectRequest(requestById(event.currentTarget.dataset.requestId)));

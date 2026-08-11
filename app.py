@@ -1013,13 +1013,6 @@ def admin_tournament(admin, tournament_id, action):
     return jsonify(ok=True)
 
 
-def same_pair_today(connection,p1,p2,include_requests=True):
-    start=time.mktime(time.localtime()[:3]+(0,0,0,0,0,-1))*1000
-    if connection.execute("SELECT 1 FROM matches WHERE active=1 AND created_at>=? AND ((player_one=? AND player_two=?) OR (player_one=? AND player_two=?))",(start,p1,p2,p2,p1)).fetchone():
-        return True
-    return include_requests and bool(connection.execute("SELECT 1 FROM requests WHERE status='pending' AND created_at>=? AND ((requester=? AND opponent=?) OR (requester=? AND opponent=?))",(start,p1,p2,p2,p1)).fetchone())
-
-
 @app.post("/api/requests")
 @require_user
 def create_request(user):
@@ -1053,8 +1046,6 @@ def create_request(user):
                 return jsonify(error="Для этого турнирного матча уже подан результат."),409
         target=connection.execute("SELECT * FROM users WHERE id=? AND status='active' AND is_player=1",(opponent,)).fetchone()
         if not target: return jsonify(error="Игрок не найден."),404
-        if not tournament_match_id and same_pair_today(connection,user["id"],opponent):
-            return jsonify(error="Для этой пары уже есть матч или заявка сегодня."),409
         rid=f"r-{secrets.token_hex(8)}"; token=secrets.token_urlsafe(24)
         connection.execute(
             """INSERT INTO requests(
@@ -1144,8 +1135,6 @@ def resolve_request(user,rid,action):
         row=connection.execute("SELECT * FROM requests WHERE id=? AND opponent=? AND status='pending'",(rid,user["id"])).fetchone()
         if not row: return jsonify(error="Заявка не найдена или уже обработана."),404
         if action=="accept":
-            if not row["tournament_match_id"] and same_pair_today(connection,row["requester"],row["opponent"],False):
-                return jsonify(error="Эта пара уже сыграла сегодня."),409
             match_id=f"m-{secrets.token_hex(8)}"
             if row["tournament_match_id"]:
                 tournament_match=connection.execute(

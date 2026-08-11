@@ -205,6 +205,29 @@ class ServerFlowTest(unittest.TestCase):
         self.assertEqual(item["token"], "")
         self.assertEqual(self.post(opponent, f"/api/requests/{request_id}/accept").status_code, 200)
 
+    def test_same_players_can_record_multiple_matches_in_one_day(self):
+        requester = app.test_client()
+        opponent = app.test_client()
+        self.assertEqual(self.login(requester, "maxim", "maxim-password-123").status_code, 200)
+        self.assertEqual(self.login(opponent, "eva", "eva-password-123").status_code, 200)
+
+        for score_requester, score_opponent in ((11, 7), (8, 11)):
+            created = self.post(requester, "/api/requests", {
+                "opponent": "u8",
+                "scoreRequester": score_requester,
+                "scoreOpponent": score_opponent,
+            })
+            self.assertEqual(created.status_code, 200)
+            accepted = self.post(opponent, f"/api/requests/{created.get_json()['id']}/accept")
+            self.assertEqual(accepted.status_code, 200)
+
+        with db() as connection:
+            count = connection.execute(
+                "SELECT COUNT(*) FROM matches WHERE active=1 AND "
+                "((player_one='u1' AND player_two='u8') OR (player_one='u8' AND player_two='u1'))"
+            ).fetchone()[0]
+            self.assertEqual(count, 2)
+
     def test_public_state_minimizes_personal_data(self):
         public = app.test_client().get("/api/state").get_json()
         player = next(user for user in public["users"] if user["id"] == "u1")
