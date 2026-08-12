@@ -4,17 +4,18 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <meta name="theme-color" content="#f7f8f6">
-  <title>Школьный рейтинг настольного тенниса</title>
+  <title>Школьный спортивный рейтинг</title>
   <link rel="icon" href="/static/school-logo.jfif">
-  <link rel="stylesheet" href="/styles.css?v=20260812-12">
+  <link rel="stylesheet" href="/styles.css?v=20260812-13">
 </head>
 <body>
   <header class="site-header">
     <div class="header-inner">
       <a class="site-name" href="#home" data-route="home">
         <img class="school-logo" src="/static/school-logo.jfif" alt="">
-        <span>Школьный рейтинг<br><small>настольного тенниса</small></span>
+        <span>Школьный рейтинг<br><small id="site-sport-name">настольного тенниса</small></span>
       </a>
+      <div class="sport-switch" role="tablist" aria-label="Вид спорта"><button type="button" role="tab" class="active" aria-selected="true" data-sport="tennis">Теннис</button><button type="button" role="tab" aria-selected="false" data-sport="chess">Шахматы</button></div>
       <nav aria-label="Основная навигация">
         <a href="#tournaments" data-route="tournaments">Турниры</a>
         <a href="#history" data-route="history" id="history-nav" hidden>История</a>
@@ -29,13 +30,13 @@
       <div id="simple-home" class="page simple-home">
         <section id="player-summary" class="player-summary" aria-label="Статистика игрока" hidden></section>
         <div class="simple-heading">
-          <div><h1>Школьный рейтинг игроков</h1></div>
+          <div><h1 id="rating-heading">Школьный рейтинг игроков</h1></div>
           <button class="button primary" data-action="add-match">Подать результат матча</button>
         </div>
         <div id="notifications-panel"></div>
         <div class="data-table-wrap simple-rating-wrap">
           <table class="data-table">
-            <thead><tr><th>Место</th><th>Игрок</th><th>Матчи</th><th>Победы</th><th>Поражения</th><th>Elo</th></tr></thead>
+            <thead><tr><th>Место</th><th>Игрок</th><th>Матчи</th><th>Победы</th><th>Поражения</th><th id="draws-heading" hidden>Ничьи</th><th>Elo</th></tr></thead>
             <tbody id="simple-rating"></tbody>
           </table>
         </div>
@@ -77,7 +78,7 @@
     </section>
   </main>
 
-  <footer><div class="page"><span>Школьный рейтинг настольного тенниса</span><span>Рейтинг рассчитывается по системе Elo</span></div></footer>
+  <footer><div class="page"><span>Школьный спортивный рейтинг</span><span>Рейтинг рассчитывается по системе Elo</span></div></footer>
 
   <dialog id="auth-dialog" class="modal small-modal">
     <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
@@ -104,6 +105,7 @@
     <p class="modal-description" id="match-description">Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.</p>
     <form id="match-form">
       <input name="tournamentMatchId" type="hidden">
+      <input name="sport" type="hidden">
       <div class="current-player-box">Первый игрок: <strong id="requester-name"></strong></div>
       <label>Соперник
         <div class="student-picker" id="student-picker">
@@ -112,7 +114,8 @@
           <div class="student-suggestions" id="student-suggestions" role="listbox" hidden></div>
         </div>
       </label>
-      <div class="score-row"><label>Ваши очки<input name="scoreRequester" type="number" min="0" max="99" value="11" required></label><span>:</span><label>Очки соперника<input name="scoreOpponent" type="number" min="0" max="99" value="7" required></label></div>
+      <div class="score-row" id="tennis-score-fields"><label>Ваши очки<input name="scoreRequester" type="number" min="0" max="99" value="11" required></label><span>:</span><label>Очки соперника<input name="scoreOpponent" type="number" min="0" max="99" value="7" required></label></div>
+      <label id="chess-result-field" hidden>Результат партии<select name="chessResult"><option value="win">Вы победили — 1:0</option><option value="draw">Ничья — ½:½</option><option value="loss">Вы проиграли — 0:1</option></select></label>
       <p class="form-message" data-form-message></p>
       <button class="button primary wide">Создать заявку</button>
     </form>
@@ -123,6 +126,7 @@
     <p class="kicker">НОВЫЙ ТУРНИР</p><h2>Создать турнир</h2>
     <p class="modal-description">После завершения регистрации запустите автоматическое распределение участников по сетке.</p>
     <form id="tournament-form">
+      <input name="sport" type="hidden">
       <label>Название<input name="name" maxlength="100" placeholder="Например, Осенний кубок" required></label>
       <label>Описание<textarea name="description" rows="3" maxlength="600" placeholder="Краткие правила или место проведения"></textarea></label>
       <div class="form-row">
@@ -164,6 +168,7 @@
     <p class="modal-description" id="challenge-opponent-name"></p>
     <form id="challenge-form">
       <input name="opponent" type="hidden">
+      <input name="sport" type="hidden">
       <label>Дата и время<input name="scheduledAt" type="datetime-local" required></label>
       <label>Комментарий<textarea name="message" rows="3" maxlength="250" placeholder="Например: после уроков, у стола в холле"></textarea></label>
       <p class="form-message" data-form-message></p>
@@ -178,6 +183,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20260812-17"></script>
+  <script src="/app.js?v=20260812-18"></script>
 </body>
 </html>

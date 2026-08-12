@@ -5,6 +5,11 @@ let db = {users:[],matches:[],requests:[],challenges:[],securityAlerts:[],tourna
 let ratingCache = {};
 let opponentOptions = [];
 let selectedTournamentId = null;
+let activeSport = localStorage.getItem('school-sport')==='chess'?'chess':'tennis';
+const sportNames={tennis:'настольный теннис',chess:'шахматы'};
+function sportLabel(sport){return sport==='chess'?'Шахматы':'Настольный теннис'}
+function sportMatches(){return db.matches.filter(match=>(match.sport||'tennis')===activeSport)}
+function scoreText(match){return (match.sport||activeSport)==='chess'?(match.scoreOne===match.scoreTwo?'½:½':match.scoreOne>match.scoreTwo?'1:0':'0:1'):`${match.scoreOne}:${match.scoreTwo}`}
 
 async function api(path,options={}){
   const method=options.method||'GET', headers=options.body?{'Content-Type':'application/json'}:{};
@@ -30,13 +35,13 @@ function escapeHtml(value=''){ const el=document.createElement('div'); el.textCo
 function calculateRatings(){
   const ratings={};
   db.users.filter(user=>user.isPlayer).forEach(user=>ratings[user.id]={rating:ELO_START,wins:0,losses:0,games:0,history:[]});
-  [...db.matches].filter(match=>match.active).sort((a,b)=>a.createdAt-b.createdAt).forEach(match=>{
+  [...db.matches].filter(match=>match.active&&(match.sport||'tennis')===activeSport).sort((a,b)=>a.createdAt-b.createdAt).forEach(match=>{
     const a=ratings[match.playerOne], b=ratings[match.playerTwo]; if(!a||!b) return;
-    const aWon=match.scoreOne>match.scoreTwo;
+    const aWon=match.scoreOne>match.scoreTwo,draw=match.scoreOne===match.scoreTwo;
     const expected=1/(1+10**((b.rating-a.rating)/400));
-    const delta=Math.round(ELO_K*((aWon?1:0)-expected));
+    const delta=Math.round(ELO_K*((draw?0.5:aWon?1:0)-expected));
     a.rating+=delta; b.rating-=delta; a.games++; b.games++;
-    if(aWon){ a.wins++; b.losses++; } else { b.wins++; a.losses++; }
+    a.draws??=0;b.draws??=0;if(draw){a.draws++;b.draws++;}else if(aWon){ a.wins++; b.losses++; } else { b.wins++; a.losses++; }
     a.history.push({matchId:match.id,rating:a.rating,delta});
     b.history.push({matchId:match.id,rating:b.rating,delta:-delta});
     match._delta=Math.abs(delta);
@@ -50,6 +55,11 @@ function rankedPlayers(includeInactive=false){
 
 function render(){
   ratingCache=calculateRatings();
+  document.body.dataset.sport=activeSport;document.querySelectorAll('.sport-switch [data-sport]').forEach(button=>{const selected=button.dataset.sport===activeSport;button.classList.toggle('active',selected);button.setAttribute('aria-selected',String(selected))});
+  document.querySelector('#site-sport-name').textContent=activeSport==='chess'?'шахматам':'настольному теннису';
+  document.querySelector('#rating-heading').textContent=activeSport==='chess'?'Школьный рейтинг по шахматам':'Школьный рейтинг по настольному теннису';
+  document.querySelector('#draws-heading').hidden=activeSport!=='chess';
+  document.title=`Школьный рейтинг — ${activeSport==='chess'?'шахматы':'настольный теннис'}`;
   renderAccount(); renderHome(); renderHistory(); renderNotifications(); renderTournaments(); renderAdmin();
   const requested=location.pathname.startsWith('/confirm/')?'home':(location.hash||'#home').slice(1);
   showView(requested,false);
@@ -69,7 +79,7 @@ function renderAccount(){
 function renderHome(){
   const players=rankedPlayers();
   renderPlayerSummary(players);
-  document.querySelector('#simple-rating').innerHTML=players.map((player,index)=>`<tr><td><span class="rank-number">${index+1}</span></td><td><button class="player-link" data-profile="${player.id}">${publicName(player)}</button></td><td>${player.games}</td><td>${player.wins}</td><td>${player.losses}</td><td><span class="rating-number">${player.rating}</span></td></tr>`).join('')||'<tr><td colspan="6" class="empty">Игроков пока нет</td></tr>';
+  document.querySelector('#simple-rating').innerHTML=players.map((player,index)=>`<tr><td><span class="rank-number">${index+1}</span></td><td><button class="player-link" data-profile="${player.id}">${publicName(player)}</button></td><td>${player.games}</td><td>${player.wins}</td><td>${player.losses}</td>${activeSport==='chess'?`<td>${player.draws||0}</td>`:''}<td><span class="rating-number">${player.rating}</span></td></tr>`).join('')||`<tr><td colspan="${activeSport==='chess'?7:6}" class="empty">Игроков пока нет</td></tr>`;
 }
 
 function renderPlayerSummary(players){
@@ -79,7 +89,7 @@ function renderPlayerSummary(players){
 
   const stats=ratingCache[me.id]||{rating:ELO_START,games:0};
   const place=players.findIndex(player=>player.id===me.id);
-  const recentMatches=db.matches
+  const recentMatches=sportMatches()
     .filter(match=>match.active&&(match.playerOne===me.id||match.playerTwo===me.id))
     .sort((a,b)=>b.createdAt-a.createdAt)
     .slice(0,3);
@@ -88,11 +98,11 @@ function renderPlayerSummary(players){
     const ownScore=isFirst?match.scoreOne:match.scoreTwo;
     const opponentScore=isFirst?match.scoreTwo:match.scoreOne;
     const opponent=userById(isFirst?match.playerTwo:match.playerOne);
-    const won=ownScore>opponentScore;
-    return `<div class="player-summary-game ${won?'win':'loss'}">
-      <span class="summary-game-result">${won?'Победа':'Поражение'}</span>
+    const draw=ownScore===opponentScore,won=ownScore>opponentScore;
+    return `<div class="player-summary-game ${draw?'draw':won?'win':'loss'}">
+      <span class="summary-game-result">${draw?'Ничья':won?'Победа':'Поражение'}</span>
       <span class="summary-game-opponent">${publicName(opponent)}</span>
-      <strong>${ownScore}:${opponentScore}</strong>
+      <strong>${activeSport==='chess'?(draw?'½:½':won?'1:0':'0:1'):`${ownScore}:${opponentScore}`}</strong>
       <time datetime="${new Date(match.createdAt).toISOString()}">${formatDate(match.createdAt)}</time>
     </div>`;
   }).join('')||'<p class="player-summary-empty">Матчей пока нет — подайте первый результат.</p>';
@@ -117,7 +127,7 @@ function renderHistory(){
   }
 
   const stats=ratingCache[me.id]||{rating:ELO_START,games:0,wins:0,losses:0,history:[]};
-  const matches=db.matches
+  const matches=sportMatches()
     .filter(match=>match.active&&(match.playerOne===me.id||match.playerTwo===me.id))
     .sort((a,b)=>b.createdAt-a.createdAt);
   const rows=matches.map(match=>{
@@ -125,13 +135,13 @@ function renderHistory(){
     const ownScore=isFirst?match.scoreOne:match.scoreTwo;
     const opponentScore=isFirst?match.scoreTwo:match.scoreOne;
     const opponent=userById(isFirst?match.playerTwo:match.playerOne);
-    const won=ownScore>opponentScore;
-    const delta=(won?1:-1)*(match._delta||0);
+    const draw=ownScore===opponentScore,won=ownScore>opponentScore;
+    const delta=(stats.history||[]).find(item=>item.matchId===match.id)?.delta||0;
     return `<tr>
       <td><time datetime="${new Date(match.createdAt).toISOString()}">${formatDate(match.createdAt)}</time></td>
-      <td><span class="history-result ${won?'win':'loss'}">${won?'Победа':'Поражение'}</span></td>
+      <td><span class="history-result ${draw?'draw':won?'win':'loss'}">${draw?'Ничья':won?'Победа':'Поражение'}</span></td>
       <td><button class="player-link" data-profile="${opponent?.id||''}">${publicName(opponent)}</button></td>
-      <td><strong class="history-score">${ownScore}:${opponentScore}</strong></td>
+      <td><strong class="history-score">${activeSport==='chess'?(draw?'½:½':won?'1:0':'0:1'):`${ownScore}:${opponentScore}`}</strong></td>
       <td><span class="history-kind">${match.tournamentMatchId?'Турнир':'Обычный матч'}</span></td>
       <td><span class="history-delta ${delta>=0?'positive':'negative'}">${delta>=0?'+':''}${delta}</span></td>
     </tr>`;
@@ -144,6 +154,7 @@ function renderHistory(){
       <div class="history-stat"><strong>${stats.games}</strong><span>Матчей</span></div>
       <div class="history-stat wins"><strong>${stats.wins}</strong><span>Побед</span></div>
       <div class="history-stat losses"><strong>${stats.losses}</strong><span>Поражений</span></div>
+      ${activeSport==='chess'?`<div class="history-stat"><strong>${stats.draws||0}</strong><span>Ничьих</span></div>`:''}
     </div>
     <section class="rating-chart-card" aria-labelledby="rating-chart-title">
       <div class="rating-chart-heading">
@@ -173,7 +184,7 @@ function drawRatingChart(){
   const wrapper=canvas.parentElement,width=Math.floor(wrapper.clientWidth),height=window.innerWidth<=560?210:260;
   if(width<80) return;
   const stats=ratingCache[me.id]||{history:[]};
-  const matchById=new Map(db.matches.map(match=>[match.id,match]));
+  const matchById=new Map(sportMatches().map(match=>[match.id,match]));
   const played=(stats.history||[]).map(item=>({...item,createdAt:matchById.get(item.matchId)?.createdAt||null}));
   const firstDate=played[0]?.createdAt||Date.now(),points=[{rating:ELO_START,createdAt:firstDate},...played];
   const dpr=Math.max(1,window.devicePixelRatio||1); canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);canvas.style.height=`${height}px`;
@@ -229,8 +240,10 @@ function bracketMatchHtml(match,allMatches,playerColors){
   const one=userById(match.playerOne),two=userById(match.playerTwo),result=db.matches.find(item=>item.id===match.resultMatchId);
   const oneColor=playerColors[match.playerOne]||'var(--green)',twoColor=playerColors[match.playerTwo]||'var(--muted)';
   if(match.status==='bye') return `<div class="bracket-match bye" data-match-id="${escapeHtml(match.id)}"><div class="bracket-player winner" style="--player-color:${oneColor}" data-player-id="${escapeHtml(match.playerOne)}"><span>${publicName(one)}<small>Проход без игры</small></span><strong>→</strong></div></div>`;
-  const scoreOne=result?(result.playerOne===match.playerOne?result.scoreOne:result.scoreTwo):null;
-  const scoreTwo=result?(result.playerOne===match.playerTwo?result.scoreOne:result.scoreTwo):null;
+  const rawScoreOne=result?(result.playerOne===match.playerOne?result.scoreOne:result.scoreTwo):null;
+  const rawScoreTwo=result?(result.playerOne===match.playerTwo?result.scoreOne:result.scoreTwo):null;
+  const scoreOne=result&&activeSport==='chess'?(rawScoreOne>rawScoreTwo?'1':rawScoreOne===rawScoreTwo?'½':'0'):rawScoreOne;
+  const scoreTwo=result&&activeSport==='chess'?(rawScoreTwo>rawScoreOne?'1':rawScoreOne===rawScoreTwo?'½':'0'):rawScoreTwo;
   const nextMatch=playerId=>allMatches.find(item=>item.sequence>match.sequence&&[item.playerOne,item.playerTwo].includes(playerId));
   const oneNext=nextMatch(match.playerOne),twoNext=nextMatch(match.playerTwo);
   const oneEliminated=match.loser===match.playerOne&&!oneNext;
@@ -303,7 +316,7 @@ function tournamentBracketLaneHtml(tournament,lane,title,playerColors){
 function renderTournaments(){
   const list=document.querySelector('#tournament-list'),detail=document.querySelector('#tournament-detail');
   const order={active:0,registration:1,completed:2,cancelled:3};
-  const tournaments=[...(db.tournaments||[])].sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)||b.startAt-a.startAt);
+  const tournaments=[...(db.tournaments||[])].filter(t=>(t.sport||'tennis')===activeSport).sort((a,b)=>(order[a.status]??9)-(order[b.status]??9)||b.startAt-a.startAt);
   if(!tournaments.length){ list.innerHTML='<div class="panel empty">Турниров пока нет</div>'; detail.innerHTML=''; return; }
   if(!tournaments.some(item=>item.id===selectedTournamentId)) selectedTournamentId=tournaments[0].id;
   list.innerHTML=tournaments.map(tournament=>{const [label,state]=tournamentStatus(tournament);return `<button class="tournament-card ${tournament.id===selectedTournamentId?'selected':''}" data-open-tournament="${tournament.id}">
@@ -325,7 +338,7 @@ function renderTournaments(){
   const podium=tournament.podium;
   const podiumHtml=podium?`<section class="tournament-podium"><div class="podium-heading"><p class="kicker">ИТОГИ ТУРНИРА</p><h3>Призовые места</h3></div><div class="podium-places"><div class="podium-place first"><span>1</span><div><strong>${publicName(userById(podium.first))}</strong><small>Победитель финала</small></div></div><div class="podium-place second"><span>2</span><div><strong>${publicName(userById(podium.second))}</strong><small>Финалист</small></div></div>${podium.third?`<div class="podium-place third"><span>3</span><div><strong>${publicName(userById(podium.third))}</strong><small>Третье место</small></div></div>`:''}</div></section>`:'';
   detail.innerHTML=`<section class="panel tournament-detail-panel">
-    <div class="tournament-detail-heading"><div><p class="kicker">${escapeHtml(tournamentStatus(tournament)[0].toUpperCase())}</p><h2>${escapeHtml(tournament.name)}</h2><p>${escapeHtml(tournament.description||'Турнир по настольному теннису с двойным выбыванием.')}</p></div>${registrationAction}</div>
+    <div class="tournament-detail-heading"><div><p class="kicker">${escapeHtml(tournamentStatus(tournament)[0].toUpperCase())}</p><h2>${escapeHtml(tournament.name)}</h2><p>${escapeHtml(tournament.description||`Турнир по ${sportNames[activeSport]} с двойным выбыванием.`)}</p></div>${registrationAction}</div>
     <div class="tournament-meta"><span><strong>${formatDateTime(tournament.startAt)}</strong>Начало</span><span><strong>${formatDateTime(tournament.registrationDeadline)}</strong>Регистрация до</span><span><strong>${tournament.participants.length} / ${tournament.maxPlayers}</strong>Участники</span>${tournament.championId?`<span><strong>${publicName(userById(tournament.championId))}</strong>Победитель</span>`:''}</div>${podiumHtml}
     <div class="tournament-layout"><aside><h3>Участники</h3><div class="participants-list">${participants}</div></aside><section class="tournament-bracket"><h3>Турнирная сетка</h3>${bracket}</section></div>
   </section>`;
@@ -335,15 +348,15 @@ function renderTournaments(){
 function renderNotifications(){
   const container=document.querySelector('#notifications-panel'), me=currentUser();
   if(!me||me.status!=='active'){ container.innerHTML=''; return; }
-  const incoming=db.requests.filter(r=>r.status==='pending'&&r.opponent===me.id&&r.notified);
-  const outgoing=db.requests.filter(r=>r.status==='pending'&&r.requester===me.id);
-  const incomingChallenges=(db.challenges||[]).filter(c=>c.status==='pending'&&c.opponent===me.id);
-  const outgoingChallenges=(db.challenges||[]).filter(c=>c.status==='pending'&&c.challenger===me.id);
-  const acceptedChallenges=(db.challenges||[]).filter(c=>c.status==='accepted'&&(c.challenger===me.id||c.opponent===me.id)&&c.scheduledAt>Date.now()-12*60*60*1000).slice(0,3);
+  const incoming=db.requests.filter(r=>(r.sport||'tennis')===activeSport&&r.status==='pending'&&r.opponent===me.id&&r.notified);
+  const outgoing=db.requests.filter(r=>(r.sport||'tennis')===activeSport&&r.status==='pending'&&r.requester===me.id);
+  const incomingChallenges=(db.challenges||[]).filter(c=>(c.sport||'tennis')===activeSport&&c.status==='pending'&&c.opponent===me.id);
+  const outgoingChallenges=(db.challenges||[]).filter(c=>(c.sport||'tennis')===activeSport&&c.status==='pending'&&c.challenger===me.id);
+  const acceptedChallenges=(db.challenges||[]).filter(c=>(c.sport||'tennis')===activeSport&&c.status==='accepted'&&(c.challenger===me.id||c.opponent===me.id)&&c.scheduledAt>Date.now()-12*60*60*1000).slice(0,3);
   if(!incoming.length&&!outgoing.length&&!incomingChallenges.length&&!outgoingChallenges.length&&!acceptedChallenges.length){ container.innerHTML=''; return; }
   container.innerHTML=`<section class="notification-section"><h2>Заявки на результаты</h2>
-    ${incoming.map(r=>{const sender=userById(r.requester);return `<div class="notification-card"><div><strong>${publicName(sender)} предлагает результат ${r.scoreRequester}:${r.scoreOpponent}</strong><p>${formatDate(r.createdAt)} · требуется ваше подтверждение</p></div><div class="notification-actions"><button class="button small danger" data-reject-request="${r.id}">Отклонить</button><button class="button small primary" data-confirm-request="${r.id}">Проверить</button></div></div>`}).join('')}
-    ${outgoing.map(r=>{const opponent=userById(r.opponent);return `<div class="notification-card pending-card"><div><strong>Заявка для ${publicName(opponent)}: ${r.scoreRequester}:${r.scoreOpponent}</strong><p>${r.notified?'Уведомление отправлено, ожидается ответ':'Ожидается подтверждение по QR-коду'}</p></div><div class="notification-actions"><button class="button small secondary" data-show-qr="${r.id}">Показать QR</button></div></div>`}).join('')}
+    ${incoming.map(r=>{const sender=userById(r.requester);return `<div class="notification-card"><div><strong>${publicName(sender)} предлагает результат ${requestScoreText(r)}</strong><p>${formatDate(r.createdAt)} · требуется ваше подтверждение</p></div><div class="notification-actions"><button class="button small danger" data-reject-request="${r.id}">Отклонить</button><button class="button small primary" data-confirm-request="${r.id}">Проверить</button></div></div>`}).join('')}
+    ${outgoing.map(r=>{const opponent=userById(r.opponent);return `<div class="notification-card pending-card"><div><strong>Заявка для ${publicName(opponent)}: ${requestScoreText(r)}</strong><p>${r.notified?'Уведомление отправлено, ожидается ответ':'Ожидается подтверждение по QR-коду'}</p></div><div class="notification-actions"><button class="button small secondary" data-show-qr="${r.id}">Показать QR</button></div></div>`}).join('')}
   </section><section class="notification-section challenge-notifications"><h2>Вызовы на матч</h2>
     ${incomingChallenges.map(c=>{const sender=userById(c.challenger);return `<div class="notification-card challenge-card"><div><strong>${publicName(sender)} предлагает сыграть</strong><p>${formatDateTime(c.scheduledAt)}${c.message?` · ${escapeHtml(c.message)}`:''}</p></div><div class="notification-actions"><button class="button small danger" data-challenge-action="reject" data-challenge-id="${c.id}">Отклонить</button><button class="button small primary" data-challenge-action="accept" data-challenge-id="${c.id}">Принять</button></div></div>`}).join('')}
     ${outgoingChallenges.map(c=>`<div class="notification-card pending-card"><div><strong>Вызов для ${publicName(userById(c.opponent))}</strong><p>${formatDateTime(c.scheduledAt)} · ожидается ответ</p></div><div class="notification-actions"><button class="button small secondary" data-challenge-action="cancel" data-challenge-id="${c.id}">Отменить</button></div></div>`).join('')}
@@ -353,13 +366,13 @@ function renderNotifications(){
 
 function renderAdmin(){
   const me=currentUser(); if(me?.role!=='admin') return;
-  const pending=db.users.filter(u=>u.status==='pending'), disputes=db.matches.filter(m=>m.active&&m.dispute), active=db.users.filter(u=>u.status==='active'&&u.isPlayer),running=(db.tournaments||[]).filter(t=>t.status==='active'||t.status==='registration');
+  const pending=db.users.filter(u=>u.status==='pending'), disputes=db.matches.filter(m=>m.active&&m.dispute&&(m.sport||'tennis')===activeSport), active=db.users.filter(u=>u.status==='active'&&u.isPlayer),running=(db.tournaments||[]).filter(t=>(t.sport||'tennis')===activeSport&&(t.status==='active'||t.status==='registration'));
   document.querySelector('#admin-stats').innerHTML=`<div class="admin-stat"><strong>${pending.length}</strong><span>заявок ожидают решения</span></div><div class="admin-stat"><strong>${disputes.length}</strong><span>жалоб требуют проверки</span></div><div class="admin-stat"><strong>${active.length}</strong><span>активных игроков</span></div><div class="admin-stat"><strong>${running.length}</strong><span>открытых турниров</span></div>`;
   document.querySelector('#pending-users').innerHTML=pending.map(u=>`<div class="request-row"><div><div class="request-name">${escapeHtml(u.firstName)} ${escapeHtml(u.lastName)}</div><div class="request-meta">${escapeHtml(u.className)} класс · @${escapeHtml(u.login)}</div></div><div class="row-actions"><button class="button small primary" data-approve="${u.id}">Подтвердить</button><button class="button small danger" data-reject="${u.id}">Отклонить</button></div></div>`).join('')||'<div class="empty">Новых заявок нет</div>';
-  document.querySelector('#disputes').innerHTML=disputes.map(m=>{const a=userById(m.playerOne),b=userById(m.playerTwo),reporter=userById(m.dispute.userId);return `<div class="request-row"><div><div class="request-name">${publicName(a)} ${m.scoreOne}:${m.scoreTwo} ${publicName(b)}</div><div class="request-meta">${publicName(reporter)}: ${escapeHtml(m.dispute.reason)}</div></div><div class="row-actions"><button class="button small secondary" data-resolve="${m.id}">Оставить</button><button class="button small danger" data-cancel-match="${m.id}">Отменить матч</button></div></div>`}).join('')||'<div class="empty">Жалоб нет</div>';
+  document.querySelector('#disputes').innerHTML=disputes.map(m=>{const a=userById(m.playerOne),b=userById(m.playerTwo),reporter=userById(m.dispute.userId);return `<div class="request-row"><div><div class="request-name">${publicName(a)} ${scoreText(m)} ${publicName(b)}</div><div class="request-meta">${publicName(reporter)}: ${escapeHtml(m.dispute.reason)}</div></div><div class="row-actions"><button class="button small secondary" data-resolve="${m.id}">Оставить</button><button class="button small danger" data-cancel-match="${m.id}">Отменить матч</button></div></div>`}).join('')||'<div class="empty">Жалоб нет</div>';
   document.querySelector('#users-body').innerHTML=db.users.map(u=>`<tr><td>${escapeHtml(u.firstName)} ${escapeHtml(u.lastName)}${u.className?` · ${escapeHtml(u.className)}`:''}</td><td>${u.login?`@${escapeHtml(u.login)}`:'ЛК Силаэдра'}</td><td><span class="state ${u.status}">${statusLabel(u.status)}</span></td><td>${u.role==='admin'?'Администратор':u.role==='teacher'?'Учитель':'Ученик'}</td><td>${u.role!=='admin'&&u.status!=='pending'?`<button class="button small secondary" data-toggle-user="${u.id}">${u.status==='active'?'Сделать неактивным':'Активировать'}</button>`:''}</td></tr>`).join('');
-  document.querySelector('#admin-tournaments-list').innerHTML=(db.tournaments||[]).map(t=>{const [label,state]=tournamentStatus(t);return `<div class="admin-tournament-row"><div><div class="request-name">${escapeHtml(t.name)}</div><div class="request-meta">${label} · ${t.participants.length}/${t.maxPlayers} участников · ${formatDateTime(t.startAt)}</div></div><div class="row-actions"><button class="button small secondary" data-open-tournament="${t.id}" data-go-tournaments>Открыть</button>${t.status==='registration'?`<button class="button small primary" data-start-tournament="${t.id}">Сформировать сетку</button><button class="button small danger" data-cancel-tournament="${t.id}">Отменить</button>`:''}</div></div>`}).join('')||'<div class="empty">Турниров пока нет</div>';
-  document.querySelector('#security-alerts').innerHTML=(db.securityAlerts||[]).map(alert=>`<div class="security-alert ${alert.severity}"><span class="security-mark">!</span><div><strong>${escapeHtml(alert.title)}</strong><p>${alert.userIds.map(id=>publicName(userById(id))).join(' и ')} · ${escapeHtml(alert.details)}</p></div></div>`).join('')||'<div class="empty">Подозрительной активности не обнаружено</div>';
+  document.querySelector('#admin-tournaments-list').innerHTML=(db.tournaments||[]).filter(t=>(t.sport||'tennis')===activeSport).map(t=>{const [label,state]=tournamentStatus(t);return `<div class="admin-tournament-row"><div><div class="request-name">${escapeHtml(t.name)}</div><div class="request-meta">${label} · ${t.participants.length}/${t.maxPlayers} участников · ${formatDateTime(t.startAt)}</div></div><div class="row-actions"><button class="button small secondary" data-open-tournament="${t.id}" data-go-tournaments>Открыть</button>${t.status==='registration'?`<button class="button small primary" data-start-tournament="${t.id}">Сформировать сетку</button><button class="button small danger" data-cancel-tournament="${t.id}">Отменить</button>`:''}</div></div>`}).join('')||'<div class="empty">Турниров пока нет</div>';
+  document.querySelector('#security-alerts').innerHTML=(db.securityAlerts||[]).filter(alert=>(alert.sport||'tennis')===activeSport).map(alert=>`<div class="security-alert ${alert.severity}"><span class="security-mark">!</span><div><strong>${escapeHtml(alert.title)}</strong><p>${alert.userIds.map(id=>publicName(userById(id))).join(' и ')} · ${escapeHtml(alert.details)}</p></div></div>`).join('')||'<div class="empty">Подозрительной активности не обнаружено</div>';
 }
 function statusLabel(status){ return ({active:'Активен',pending:'Ожидает',inactive:'Неактивен',rejected:'Отклонён'})[status]||status; }
 
@@ -389,7 +402,10 @@ function openMatchForm(tournamentMatch=null, presetOpponentId=null){
   if(me.status!=='active'){ toast('Сначала дождитесь подтверждения администратора'); return; }
   if(!me.isPlayer){ toast('Администратор без профиля игрока не может подать результат'); return; }
   const players=rankedPlayers().filter(p=>p.id!==me.id); const form=document.querySelector('#match-form');
-  opponentOptions=players; form.reset(); form.opponent.value=''; form.tournamentMatchId.value=tournamentMatch?.id||''; form.scoreRequester.value=11; form.scoreOpponent.value=7;
+  opponentOptions=players; form.reset(); form.opponent.value=''; form.tournamentMatchId.value=tournamentMatch?.id||''; form.sport.value=activeSport; form.scoreRequester.value=11; form.scoreOpponent.value=7;
+  document.querySelector('#tennis-score-fields').hidden=activeSport==='chess';
+  document.querySelector('#chess-result-field').hidden=activeSport!=='chess';
+  form.scoreRequester.required=activeSport==='tennis'; form.scoreOpponent.required=activeSport==='tennis'; form.chessResult.required=activeSport==='chess';
   document.querySelector('#opponent-search').value=''; document.querySelector('#student-picker').classList.remove('selected');
   document.querySelector('#student-suggestions').hidden=true; document.querySelector('#opponent-search').setAttribute('aria-expanded','false');
   document.querySelector('#requester-name').textContent=displayName(me);
@@ -397,7 +413,7 @@ function openMatchForm(tournamentMatch=null, presetOpponentId=null){
   search.readOnly=Boolean(tournamentMatch);
   document.querySelector('#match-kicker').textContent=tournamentMatch?'ТУРНИРНЫЙ МАТЧ':'НОВАЯ ЗАЯВКА';
   document.querySelector('#match-title').textContent=tournamentMatch?'Внести результат турнира':'Подать результат матча';
-  document.querySelector('#match-description').textContent=tournamentMatch?'Соперник уже выбран сеткой. После подтверждения система автоматически распределит игроков по следующему раунду.':'Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.';
+  document.querySelector('#match-description').textContent=tournamentMatch?(activeSport==='chess'?'Соперник уже выбран сеткой. Выберите победителя партии: при ничьей турнирную партию нужно переиграть.':'Соперник уже выбран сеткой. После подтверждения система автоматически распределит игроков по следующему раунду.'):(activeSport==='chess'?'Укажите соперника и результат партии. Соперник подтвердит его по QR-коду или через уведомление.':'Укажите соперника и счёт. После этого соперник должен подтвердить результат по QR-коду или через уведомление.');
   if(tournamentMatch){
     const opponentId=tournamentMatch.playerOne===me.id?tournamentMatch.playerTwo:tournamentMatch.playerOne;
     const opponent=players.find(player=>player.id===opponentId);
@@ -426,10 +442,11 @@ function selectOpponent(id){
 
 function validScore(a,b){ const high=Math.max(a,b),low=Math.min(a,b); if(a===b||high<11) return false; if(low<10) return high===11; return high-low===2; }
 function requestById(id){ return db.requests.find(request=>request.id===id); }
+function requestScoreText(request){return (request.sport||'tennis')==='chess'?(request.scoreRequester===request.scoreOpponent?'½:½':request.scoreRequester>request.scoreOpponent?'1:0':'0:1'):`${request.scoreRequester}:${request.scoreOpponent}`}
 function showQr(request){
   const opponent=userById(request.opponent), requester=userById(request.requester);
   document.querySelector('#request-qr').src=`/api/requests/${encodeURIComponent(request.id)}/qr?v=${Date.now()}`;
-  document.querySelector('#request-summary').textContent=`${displayName(requester)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(opponent)}`;
+  document.querySelector('#request-summary').textContent=`${displayName(requester)} ${requestScoreText(request)} ${displayName(opponent)}`;
   const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=false; button.textContent=request.notified?'Повторить отправку через ЛК':'Отправить через ЛК Силаэдра';
   document.querySelector('#notification-status').textContent=request.notified?'Соперник видит заявку на сайте. Отправку через ЛК можно безопасно повторить.':'ЛК отправит уведомление на email и в подключённый Telegram.';
   document.querySelector('#qr-dialog').showModal();
@@ -440,7 +457,7 @@ function openConfirmation(request){
   if(!me){ openAuth(); return; }
   if(me.id!==request.opponent){ toast('Подтвердить результат может только указанный соперник'); return; }
   const sender=userById(request.requester);
-  document.querySelector('#confirm-result').textContent=`${displayName(sender)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(me)}`;
+  document.querySelector('#confirm-result').textContent=`${displayName(sender)} ${requestScoreText(request)} ${displayName(me)}`;
   document.querySelector('#accept-request').dataset.requestId=request.id; document.querySelector('#reject-request').dataset.requestId=request.id;
   document.querySelector('#confirm-dialog').showModal();
 }
@@ -463,7 +480,7 @@ async function rejectRequest(request){
 }
 function profileOutcome(match,id){
   const own=match.playerOne===id?match.scoreOne:match.scoreTwo, other=match.playerOne===id?match.scoreTwo:match.scoreOne;
-  return own>other?'win':'loss';
+  return own===other?'draw':own>other?'win':'loss';
 }
 function drawProfileRatingChart(id){
   const canvas=document.querySelector('#profile-rating-chart'); if(!canvas)return;
@@ -475,33 +492,40 @@ function drawProfileRatingChart(id){
 }
 function openChallenge(id){
   const me=currentUser(),opponent=userById(id);if(!me){openAuth();return}if(!opponent||opponent.id===me.id)return;
-  const form=document.querySelector('#challenge-form');form.reset();form.opponent.value=id;form.scheduledAt.value=localDateTimeValue(Date.now()+24*60*60*1000);form.querySelector('[data-form-message]').textContent='';
-  document.querySelector('#challenge-opponent-name').textContent=`Соперник: ${displayName(opponent)}`;document.querySelector('#challenge-dialog').showModal();
+  const form=document.querySelector('#challenge-form');form.reset();form.opponent.value=id;form.sport.value=activeSport;form.scheduledAt.value=localDateTimeValue(Date.now()+24*60*60*1000);form.querySelector('[data-form-message]').textContent='';
+  document.querySelector('#challenge-opponent-name').textContent=`${sportLabel(activeSport)} · соперник: ${displayName(opponent)}`;document.querySelector('#challenge-dialog').showModal();
 }
 function openProfile(id){
   const user=userById(id), stats=ratingCache[id]; if(!user||!stats) return;
-  const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=db.matches.filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
+  const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=sportMatches().filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
   const rate=stats.games?Math.round(stats.wins/stats.games*100):0;
   const email=user.email&&(currentUser()?.id===id||currentUser()?.role==='admin')?`<p>Почта ЛК: ${escapeHtml(user.email)}</p>`:'';
   const form=games.slice(0,5).map(match=>profileOutcome(match,id));
   const changeIndex=form.findIndex(item=>item!==form[0]),streakLength=form.length?(changeIndex<0?form.length:changeIndex):0;
-  const streakWord=form[0]==='win'?(streakLength===1?'победа':streakLength<5?'победы':'побед'):(streakLength===1?'поражение':streakLength<5?'поражения':'поражений');
+  const streakWord=form[0]==='draw'?(streakLength===1?'ничья':streakLength<5?'ничьи':'ничьих'):form[0]==='win'?(streakLength===1?'победа':streakLength<5?'победы':'побед'):(streakLength===1?'поражение':streakLength<5?'поражения':'поражений');
   const streakText=streakLength?`${streakLength} ${streakWord} подряд`:'Матчей пока нет';
-  const me=currentUser(),headToHead=me&&me.id!==id?games.filter(match=>match.playerOne===me.id||match.playerTwo===me.id):[],h2hWins=headToHead.filter(match=>profileOutcome(match,id)==='win').length;
-  const h2h=me&&me.id!==id?`<div class="head-to-head"><div><span>Личные встречи с вами</span><strong>${h2hWins}:${headToHead.length-h2hWins}</strong><small>в пользу ${escapeHtml(user.firstName)}</small></div><button class="button primary" data-challenge-player="${id}">Вызвать на матч</button></div>`:'';
-  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-form-row"><div><span>Последняя форма</span><div class="form-dots">${form.map(item=>`<i class="${item}">${item==='win'?'В':'П'}</i>`).join('')||'—'}</div></div><strong>${streakText}</strong></div>${h2h}<div class="profile-chart"><h3>Изменение рейтинга</h3><canvas id="profile-rating-chart" aria-label="График рейтинга игрока"></canvas></div><div class="profile-notification-note">Уведомления по email и в Telegram настраиваются в ЛК Силаэдра.</div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
+  const me=currentUser(),headToHead=me&&me.id!==id?games.filter(match=>match.playerOne===me.id||match.playerTwo===me.id):[],h2hWins=headToHead.filter(match=>profileOutcome(match,id)==='win').length,h2hLosses=headToHead.filter(match=>profileOutcome(match,id)==='loss').length,h2hDraws=headToHead.length-h2hWins-h2hLosses;
+  const h2h=me&&me.id!==id?`<div class="head-to-head"><div><span>Личные встречи с вами</span><strong>${h2hWins}:${h2hLosses}${activeSport==='chess'?` · ничьи ${h2hDraws}`:''}</strong><small>победы ${escapeHtml(user.firstName)} и ваши</small></div><button class="button primary" data-challenge-player="${id}">Вызвать на матч</button></div>`:'';
+  const record=activeSport==='chess'?`${stats.wins}/${stats.draws||0}/${stats.losses}`:`${stats.wins}/${stats.losses}`;
+  const recordLabel=activeSport==='chess'?'Победы / ничьи / поражения':'Победы / поражения';
+  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${record}</strong><span>${recordLabel}</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-form-row"><div><span>Последняя форма</span><div class="form-dots">${form.map(item=>`<i class="${item}">${item==='draw'?'Н':item==='win'?'В':'П'}</i>`).join('')||'—'}</div></div><strong>${streakText}</strong></div>${h2h}<div class="profile-chart"><h3>Изменение рейтинга</h3><canvas id="profile-rating-chart" aria-label="График рейтинга игрока"></canvas></div><div class="profile-notification-note">Уведомления по email и в Telegram настраиваются в ЛК Силаэдра.</div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne),own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne,result=activeSport==='chess'?(own===other?'½:½':own>other?'1:0':'0:1'):`${own}:${other}`;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${result}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
   document.querySelector('#profile-dialog').showModal();requestAnimationFrame(()=>drawProfileRatingChart(id));
 }
 
 function toast(message){ const el=document.querySelector('#toast'); el.textContent=message; el.classList.add('show'); clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.classList.remove('show'),2500); }
 
 document.addEventListener('click',async event=>{
+  const sportButton=event.target.closest('.sport-switch [data-sport]');
+  if(sportButton){
+    activeSport=sportButton.dataset.sport; localStorage.setItem('school-sport',activeSport); selectedTournamentId=null;
+    render(); showView((location.hash||'#home').slice(1),false); return;
+  }
   const student=event.target.closest('[data-student]'); if(student){ selectOpponent(student.dataset.student); return; }
   const route=event.target.closest('[data-route]'); if(route){ event.preventDefault(); showView(route.dataset.route); return; }
   if(event.target.closest('[data-action="open-auth"]')) openAuth();
   if(event.target.closest('[data-action="logout"]')){ try{if(db.oidcSession){const result=await api('/auth/silaeder/logout',{method:'POST',body:{}});location.href=result.redirect}else{await mutate('/api/logout',{});toast('Вы вышли из аккаунта')}}catch(error){toast(error.message)} }
   if(event.target.closest('[data-action="add-match"]')) openMatchForm();
-  const createTournament=event.target.closest('[data-action="create-tournament"]'); if(createTournament){ const form=document.querySelector('#tournament-form'),now=Date.now();form.reset();form.maxPlayers.value=8;form.registrationDeadline.value=localDateTimeValue(now+24*60*60*1000);form.startAt.value=localDateTimeValue(now+48*60*60*1000);form.querySelector('[data-form-message]').textContent='';document.querySelector('#tournament-dialog').showModal(); }
+  const createTournament=event.target.closest('[data-action="create-tournament"]'); if(createTournament){ const form=document.querySelector('#tournament-form'),now=Date.now();form.reset();form.sport.value=activeSport;form.maxPlayers.value=8;form.registrationDeadline.value=localDateTimeValue(now+24*60*60*1000);form.startAt.value=localDateTimeValue(now+48*60*60*1000);form.querySelector('[data-form-message]').textContent='';document.querySelector('#tournament-dialog').showModal(); }
   const openTournament=event.target.closest('[data-open-tournament]'); if(openTournament){ selectedTournamentId=openTournament.dataset.openTournament;renderTournaments();if(openTournament.hasAttribute('data-go-tournaments'))showView('tournaments'); }
   const joinTournament=event.target.closest('[data-join-tournament]'); if(joinTournament){ try{await mutate(`/api/tournaments/${joinTournament.dataset.joinTournament}/join`,{});toast('Вы зарегистрированы на турнир')}catch(error){toast(error.message)} }
   const leaveTournament=event.target.closest('[data-leave-tournament]'); if(leaveTournament){ try{await mutate(`/api/tournaments/${leaveTournament.dataset.leaveTournament}/leave`,{});toast('Участие отменено')}catch(error){toast(error.message)} }
@@ -549,25 +573,30 @@ document.querySelector('#login-form').addEventListener('submit',async event=>{
 });
 
 document.querySelector('#match-form').addEventListener('submit',async event=>{
-  event.preventDefault(); const form=event.currentTarget, me=currentUser(), opponent=form.opponent.value,s1=Number(form.scoreRequester.value),s2=Number(form.scoreOpponent.value),message=form.querySelector('[data-form-message]');
+  event.preventDefault(); const form=event.currentTarget, me=currentUser(), opponent=form.opponent.value,message=form.querySelector('[data-form-message]');
+  let s1=Number(form.scoreRequester.value),s2=Number(form.scoreOpponent.value);
+  if(activeSport==='chess'){
+    const chessScores={win:[2,0],draw:[1,1],loss:[0,2]};[s1,s2]=chessScores[form.chessResult.value]||[NaN,NaN];
+  }
   if(!me||me.status!=='active'){ message.textContent='Аккаунт не подтверждён.'; return; }
   if(!opponent){ message.textContent='Выберите соперника из предложенного списка.'; return; }
   if(opponent===me.id){ message.textContent='Выберите другого игрока.'; return; }
-  if(!validScore(s1,s2)){ message.textContent='Некорректный счёт. Победа — от 11 очков с преимуществом в два.'; return; }
-  try { const created=await api('/api/requests',{method:'POST',body:{opponent,scoreRequester:s1,scoreOpponent:s2,tournamentMatchId:form.tournamentMatchId.value||null}}); await refreshState(); const result=requestById(created.id); document.querySelector('#match-dialog').close();render();showQr(result);toast('Заявка создана'); }
+  if(activeSport==='tennis'&&!validScore(s1,s2)){ message.textContent='Некорректный счёт. Победа — от 11 очков с преимуществом в два.'; return; }
+  if(activeSport==='chess'&&form.tournamentMatchId.value&&s1===s2){ message.textContent='В турнирной партии нужен победитель. При ничьей сыграйте дополнительную партию.'; return; }
+  try { const created=await api('/api/requests',{method:'POST',body:{sport:activeSport,opponent,scoreRequester:s1,scoreOpponent:s2,tournamentMatchId:form.tournamentMatchId.value||null}}); await refreshState(); const result=requestById(created.id); document.querySelector('#match-dialog').close();render();showQr(result);toast('Заявка создана'); }
   catch(error){ message.textContent=error.message; }
 });
 
 document.querySelector('#tournament-form').addEventListener('submit',async event=>{
   event.preventDefault();const form=event.currentTarget,message=form.querySelector('[data-form-message]');
   const registrationDeadline=new Date(form.registrationDeadline.value).getTime(),startAt=new Date(form.startAt.value).getTime();
-  try{const created=await api('/api/admin/tournaments',{method:'POST',body:{name:form.name.value.trim(),description:form.description.value.trim(),registrationDeadline,startAt,maxPlayers:Number(form.maxPlayers.value)}});await refreshState();selectedTournamentId=created.id;form.reset();document.querySelector('#tournament-dialog').close();render();showView('tournaments');toast('Турнир создан, регистрация открыта')}
+  try{const created=await api('/api/admin/tournaments',{method:'POST',body:{sport:activeSport,name:form.name.value.trim(),description:form.description.value.trim(),registrationDeadline,startAt,maxPlayers:Number(form.maxPlayers.value)}});await refreshState();selectedTournamentId=created.id;form.reset();document.querySelector('#tournament-dialog').close();render();showView('tournaments');toast('Турнир создан, регистрация открыта')}
   catch(error){message.textContent=error.message}
 });
 
 document.querySelector('#challenge-form').addEventListener('submit',async event=>{
   event.preventDefault();const form=event.currentTarget,message=form.querySelector('[data-form-message]'),scheduledAt=new Date(form.scheduledAt.value).getTime();
-  try{await mutate('/api/challenges',{opponent:form.opponent.value,scheduledAt,message:form.message.value.trim()});document.querySelector('#challenge-dialog').close();toast('Вызов отправлен сопернику')}
+  try{await mutate('/api/challenges',{sport:activeSport,opponent:form.opponent.value,scheduledAt,message:form.message.value.trim()});document.querySelector('#challenge-dialog').close();toast('Вызов отправлен сопернику')}
   catch(error){message.textContent=error.message}
 });
 

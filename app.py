@@ -104,6 +104,16 @@ def valid_score(a, b):
     return high == 11 if low < 10 else high - low == 2
 
 
+def valid_sport(value):
+    return value if value in {"tennis", "chess"} else None
+
+
+def valid_match_score(sport, a, b, tournament=False):
+    if sport == "tennis":
+        return valid_score(a, b)
+    return (a, b) in ({(2, 0), (0, 2)} if tournament else {(2, 0), (1, 1), (0, 2)})
+
+
 def clean_text(value, field, max_length, required=True):
     text = str(value or "").strip()
     if required and not text:
@@ -272,16 +282,16 @@ def serialize_user(row, viewer):
     return data
 
 
-def calculate_server_ratings(connection):
+def calculate_server_ratings(connection, sport="tennis"):
     ratings = {row["id"]: ELO_START for row in connection.execute("SELECT id FROM users WHERE is_player=1")}
-    rows = connection.execute("SELECT player_one,player_two,score_one,score_two FROM matches WHERE active=1 ORDER BY created_at").fetchall()
+    rows = connection.execute("SELECT player_one,player_two,score_one,score_two FROM matches WHERE active=1 AND sport=? ORDER BY created_at", (sport,)).fetchall()
     for match in rows:
         if match["player_one"] not in ratings or match["player_two"] not in ratings:
             continue
         rating_one, rating_two = ratings[match["player_one"]], ratings[match["player_two"]]
         expected_one = 1 / (1 + 10 ** ((rating_two - rating_one) / 400))
-        player_one_won = match["score_one"] > match["score_two"]
-        delta = round(ELO_K * ((1 if player_one_won else 0) - expected_one))
+        actual_one = 0.5 if match["score_one"] == match["score_two"] else (1 if match["score_one"] > match["score_two"] else 0)
+        delta = round(ELO_K * (actual_one - expected_one))
         ratings[match["player_one"]] += delta
         ratings[match["player_two"]] -= delta
     return ratings
@@ -295,40 +305,40 @@ def suspicious_activity(connection):
     frequent = connection.execute(
         """SELECT CASE WHEN requester<opponent THEN requester ELSE opponent END AS first_id,
                   CASE WHEN requester<opponent THEN opponent ELSE requester END AS second_id,
-                  COUNT(*) AS total
+                  sport,COUNT(*) AS total
              FROM requests WHERE status='accepted' AND resolved_at>=?
-            GROUP BY first_id,second_id HAVING COUNT(*)>=4 ORDER BY total DESC""",
+            GROUP BY sport,first_id,second_id HAVING COUNT(*)>=4 ORDER BY total DESC""",
         (cutoff_day,),
     ).fetchall()
     for row in frequent:
         alerts.append({"kind": "frequent_pair", "severity": "high", "title": "Частые матчи одной пары",
                        "details": f"За 24 часа подтверждено матчей: {row['total']}",
-                       "userIds": [row["first_id"], row["second_id"]], "count": row["total"]})
+                       "userIds": [row["first_id"], row["second_id"]], "count": row["total"], "sport": row["sport"]})
 
     repeated = connection.execute(
         """SELECT CASE WHEN requester<opponent THEN requester ELSE opponent END AS first_id,
                   CASE WHEN requester<opponent THEN opponent ELSE requester END AS second_id,
                   MIN(score_requester,score_opponent) AS low_score,
-                  MAX(score_requester,score_opponent) AS high_score,COUNT(*) AS total
+                  MAX(score_requester,score_opponent) AS high_score,sport,COUNT(*) AS total
              FROM requests WHERE status='accepted' AND resolved_at>=?
-            GROUP BY first_id,second_id,low_score,high_score HAVING COUNT(*)>=3 ORDER BY total DESC""",
+            GROUP BY sport,first_id,second_id,low_score,high_score HAVING COUNT(*)>=3 ORDER BY total DESC""",
         (cutoff_week,),
     ).fetchall()
     for row in repeated:
         alerts.append({"kind": "repeated_score", "severity": "medium", "title": "Повторяющийся счёт",
                        "details": f"Счёт {row['high_score']}:{row['low_score']} повторился {row['total']} раза за 7 дней",
-                       "userIds": [row["first_id"], row["second_id"]], "count": row["total"]})
+                       "userIds": [row["first_id"], row["second_id"]], "count": row["total"], "sport": row["sport"]})
 
     fast = connection.execute(
-        """SELECT requester,opponent,COUNT(*) AS total FROM requests
+        """SELECT requester,opponent,sport,COUNT(*) AS total FROM requests
             WHERE status='accepted' AND resolved_at>=? AND resolved_at-created_at<=30000
-            GROUP BY requester,opponent HAVING COUNT(*)>=3 ORDER BY total DESC""",
+            GROUP BY sport,requester,opponent HAVING COUNT(*)>=3 ORDER BY total DESC""",
         (cutoff_week,),
     ).fetchall()
     for row in fast:
         alerts.append({"kind": "fast_confirmation", "severity": "medium", "title": "Слишком быстрые подтверждения",
                        "details": f"Подтверждений быстрее 30 секунд: {row['total']}",
-                       "userIds": [row["requester"], row["opponent"]], "count": row["total"]})
+                       "userIds": [row["requester"], row["opponent"]], "count": row["total"], "sport": row["sport"]})
     return alerts[:20]
 
 
@@ -476,6 +486,7 @@ def serialize_tournaments(connection):
         podium = tournament_podium(row, bracket)
         tournaments.append({
             "id": row["id"], "name": row["name"], "description": row["description"],
+            "sport": row["sport"],
             "registrationDeadline": row["registration_deadline"], "startAt": row["start_at"],
             "maxPlayers": row["max_players"], "status": row["status"],
             "championId": row["champion_id"], "podium": podium, "createdAt": row["created_at"],
@@ -594,6 +605,7 @@ def state():
     for m in matches:
         item = {"id":m["id"],"playerOne":m["player_one"],"playerTwo":m["player_two"],
                 "scoreOne":m["score_one"],"scoreTwo":m["score_two"],
+                "sport":m["sport"],
                 "createdAt":m["created_at"],"active":bool(m["active"]),
                 "tournamentMatchId":m.get("tournament_match_id") if isinstance(m, dict) else m["tournament_match_id"]}
         if viewer and viewer["role"] == "admin":
@@ -605,10 +617,10 @@ def state():
                       "requester":r["requester"],"opponent":r["opponent"],
                       "scoreRequester":r["score_requester"],"scoreOpponent":r["score_opponent"],
                       "status":r["status"],"notified":bool(r["notified"]),"createdAt":r["created_at"],
-                      "tournamentMatchId":r.get("tournament_match_id")} for r in requests_rows]
+                      "tournamentMatchId":r.get("tournament_match_id"),"sport":r["sport"]} for r in requests_rows]
     challenges_json = [{"id":r["id"], "challenger":r["challenger"], "opponent":r["opponent"],
                         "scheduledAt":r["scheduled_at"], "message":r["message"], "status":r["status"],
-                        "createdAt":r["created_at"], "resolvedAt":r["resolved_at"]} for r in challenge_rows]
+                        "createdAt":r["created_at"], "resolvedAt":r["resolved_at"], "sport":r["sport"]} for r in challenge_rows]
     return jsonify(users=users, matches=matches_json, requests=requests_json, challenges=challenges_json,
                    securityAlerts=security_alerts, tournaments=tournaments,
                    currentUserId=viewer["id"] if viewer else None,
@@ -917,6 +929,9 @@ def search_users(viewer):
 @require_admin
 def create_tournament(admin):
     data = request.get_json(silent=True) or {}
+    sport = valid_sport(data.get("sport") or "tennis")
+    if not sport:
+        return jsonify(error="Неизвестный вид спорта."), 400
     try:
         name = clean_text(data.get("name"), "Название", 100)
         description = clean_text(data.get("description"), "Описание", 600, required=False)
@@ -934,9 +949,9 @@ def create_tournament(admin):
     with db() as connection:
         connection.execute(
             """INSERT INTO tournaments(
-                 id,name,description,registration_deadline,start_at,max_players,status,created_by,created_at
-               ) VALUES(?,?,?,?,?,?, 'registration',?,?)""",
-            (tournament_id, name, description, registration_deadline, start_at, max_players, admin["id"], now_ms()),
+                 id,name,description,registration_deadline,start_at,max_players,status,created_by,created_at,sport
+               ) VALUES(?,?,?,?,?,?, 'registration',?,?,?)""",
+            (tournament_id, name, description, registration_deadline, start_at, max_players, admin["id"], now_ms(), sport),
         )
     return jsonify(id=tournament_id)
 
@@ -1000,7 +1015,7 @@ def admin_tournament(admin, tournament_id, action):
         ).fetchall()
         if len(participants) < 2:
             return jsonify(error="Для запуска нужны хотя бы два участника."), 409
-        ratings = calculate_server_ratings(connection)
+        ratings = calculate_server_ratings(connection, tournament["sport"])
         ordered = sorted(participants, key=lambda row: (-ratings.get(row["user_id"], ELO_START), row["joined_at"]))
         for seed, participant in enumerate(ordered, 1):
             connection.execute(
@@ -1016,6 +1031,8 @@ def admin_tournament(admin, tournament_id, action):
 @require_user
 def create_request(user):
     data=request.get_json(silent=True) or {}; opponent=data.get("opponent")
+    sport=valid_sport(data.get("sport") or "tennis")
+    if not sport: return jsonify(error="Неизвестный вид спорта."),400
     tournament_match_id=data.get("tournamentMatchId") or None
     if not isinstance(opponent, str) or len(opponent) > 80:
         return jsonify(error="Некорректный соперник."), 400
@@ -1023,7 +1040,7 @@ def create_request(user):
         return jsonify(error="Некорректный турнирный матч."), 400
     try: s1,s2=int(data.get("scoreRequester")),int(data.get("scoreOpponent"))
     except (TypeError,ValueError): return jsonify(error="Некорректный счёт."),400
-    if opponent==user["id"] or not valid_score(s1,s2): return jsonify(error="Проверьте соперника и счёт матча."),400
+    if opponent==user["id"]: return jsonify(error="Проверьте соперника."),400
     if not user["is_player"]:
         return jsonify(error="Для подачи результата нужен профиль игрока."),403
     with db() as connection:
@@ -1034,6 +1051,9 @@ def create_request(user):
             ).fetchone()
             if not tournament_match or tournament_match["status"]!="pending" or tournament_match["tournament_status"]!="active":
                 return jsonify(error="Турнирный матч не найден или уже завершён."),404
+            tournament_sport=connection.execute("SELECT sport FROM tournaments WHERE id=?",(tournament_match["tournament_id"],)).fetchone()["sport"]
+            if sport != tournament_sport:
+                return jsonify(error="Вид спорта не совпадает с турниром."),400
             if user["id"] not in {tournament_match["player_one"],tournament_match["player_two"]}:
                 return jsonify(error="Подать результат могут только участники этого матча."),403
             expected_opponent = tournament_match["player_two"] if user["id"] == tournament_match["player_one"] else tournament_match["player_one"]
@@ -1043,14 +1063,17 @@ def create_request(user):
                 "SELECT 1 FROM requests WHERE tournament_match_id=? AND status='pending'", (tournament_match_id,)
             ).fetchone():
                 return jsonify(error="Для этого турнирного матча уже подан результат."),409
+        if not valid_match_score(sport,s1,s2,bool(tournament_match_id)):
+            message="В турнирных шахматах должна быть определена победа." if sport=="chess" and tournament_match_id else "Проверьте результат матча."
+            return jsonify(error=message),400
         target=connection.execute("SELECT * FROM users WHERE id=? AND status='active' AND is_player=1",(opponent,)).fetchone()
         if not target: return jsonify(error="Игрок не найден."),404
         rid=f"r-{secrets.token_hex(8)}"; token=secrets.token_urlsafe(24)
         connection.execute(
             """INSERT INTO requests(
-                 id,token,requester,opponent,score_requester,score_opponent,created_at,tournament_match_id
-               ) VALUES(?,?,?,?,?,?,?,?)""",
-            (rid,token,user["id"],opponent,s1,s2,now_ms(),tournament_match_id),
+                 id,token,requester,opponent,score_requester,score_opponent,created_at,tournament_match_id,sport
+               ) VALUES(?,?,?,?,?,?,?,?,?)""",
+            (rid,token,user["id"],opponent,s1,s2,now_ms(),tournament_match_id,sport),
         )
     return jsonify(id=rid,token=token)
 
@@ -1072,12 +1095,18 @@ def notify_request(user,rid):
         recipient_sub = notification_recipient_sub(connection, row["opponent"])
     if not recipient_sub:
         return jsonify(ok=True, notificationStatus="no_oidc", queued=False)
+    if row["sport"] == "chess":
+        notification_score = "½:½" if row["score_requester"] == row["score_opponent"] else (
+            "1:0" if row["score_requester"] > row["score_opponent"] else "0:1"
+        )
+    else:
+        notification_score = f"{row['score_requester']}:{row['score_opponent']}"
     try:
         result = send_external_notification(
             recipient_sub,
-            f"tennis.match-request.{rid}",
+            f"school-sport.{row['sport']}.match-request.{rid}",
             "Подтвердите результат матча",
-            f"Ваш соперник указал результат матча: {row['score_requester']}:{row['score_opponent']}. "
+            f"Ваш соперник указал результат матча: {notification_score}. "
             "Подтвердите или отклоните его на сайте.",
             safe_notification_url(f"/confirm/{row['token']}"),
         )
@@ -1127,10 +1156,10 @@ def resolve_match_request(connection, request_id, opponent_id, action):
         connection.execute(
             """INSERT INTO matches(
                  id,player_one,player_two,score_one,score_two,confirmed_by,created_at,active,
-                 dispute_user,dispute_reason,tournament_match_id
-               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                 dispute_user,dispute_reason,tournament_match_id,sport
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
             (match_id,row["requester"],row["opponent"],row["score_requester"],row["score_opponent"],
-             opponent_id,now_ms(),1,None,None,row["tournament_match_id"]),
+             opponent_id,now_ms(),1,None,None,row["tournament_match_id"],row["sport"]),
         )
         if tournament_match:
             winner = row["requester"] if row["score_requester"] > row["score_opponent"] else row["opponent"]
@@ -1172,6 +1201,9 @@ def resolve_request(user,rid,action):
 def create_challenge(user):
     data = request.get_json(silent=True) or {}
     opponent = data.get("opponent")
+    sport = valid_sport(data.get("sport") or "tennis")
+    if not sport:
+        return jsonify(error="Неизвестный вид спорта."), 400
     try:
         scheduled_at = int(data.get("scheduledAt"))
         message = clean_text(data.get("message"), "Комментарий", 250, required=False)
@@ -1189,16 +1221,16 @@ def create_challenge(user):
             return jsonify(error="Игрок не найден."), 404
         challenge_id = f"c-{secrets.token_hex(8)}"
         connection.execute(
-            "INSERT INTO match_challenges(id,challenger,opponent,scheduled_at,message,created_at) VALUES(?,?,?,?,?,?)",
-            (challenge_id, user["id"], opponent, scheduled_at, message, now_ms()),
+            "INSERT INTO match_challenges(id,challenger,opponent,scheduled_at,message,created_at,sport) VALUES(?,?,?,?,?,?,?)",
+            (challenge_id, user["id"], opponent, scheduled_at, message, now_ms(), sport),
         )
     with db() as connection:
         recipient_sub = notification_recipient_sub(connection, opponent)
     if recipient_sub:
         try:
             send_external_notification(
-                recipient_sub, f"tennis.challenge.{challenge_id}", "Вызов на матч",
-                f"{user['first_name']} {user['last_name']} предлагает сыграть в настольный теннис. Откройте сайт, чтобы принять или отклонить вызов.",
+                recipient_sub, f"school-sport.{sport}.challenge.{challenge_id}", "Вызов на матч",
+                f"{user['first_name']} {user['last_name']} предлагает сыграть в {'шахматы' if sport == 'chess' else 'настольный теннис'}. Откройте сайт, чтобы принять или отклонить вызов.",
                 safe_notification_url("/#home"),
             )
         except ExternalNotificationError as error:

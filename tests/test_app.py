@@ -14,7 +14,7 @@ os.environ["CRM_OIDC_ENABLED"] = "false"
 os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["ALLOW_LOCAL_USER_LOGIN"] = "true"
 
-from app import (QR_BASE_URL, ROOT, app, clear_login_failures, db,
+from app import (QR_BASE_URL, ROOT, app, calculate_server_ratings, clear_login_failures, db,
                  seed_database, send_external_notification, update_user_from_oidc)  # noqa: E402
 
 with app.app_context():
@@ -166,7 +166,7 @@ class ServerFlowTest(unittest.TestCase):
             self.assertEqual(notified.get_json()["notificationStatus"], "queued")
             send_notification.assert_called_once()
             self.assertEqual(send_notification.call_args.args[0], "790be3dd-4b7a-4ab4-94ce-82d44bcfd06f")
-            self.assertEqual(send_notification.call_args.args[1], f"tennis.match-request.{request_id}")
+            self.assertEqual(send_notification.call_args.args[1], f"school-sport.tennis.match-request.{request_id}")
             self.assertIn(f"/confirm/{confirmation_token}", send_notification.call_args.args[4])
         self.assertEqual(opponent.get(f"/confirm/{confirmation_token}").status_code, 200)
         with opponent.session_transaction() as confirmation_session:
@@ -176,6 +176,57 @@ class ServerFlowTest(unittest.TestCase):
         item = next(item for item in opponent_state["requests"] if item["id"] == request_id)
         self.assertEqual(item["token"], "")
         self.assertEqual(self.post(opponent, f"/api/requests/{request_id}/accept").status_code, 200)
+
+    def test_chess_matches_support_draws_and_have_separate_elo(self):
+        import time
+
+        requester = app.test_client()
+        opponent = app.test_client()
+        self.assertEqual(self.login(requester, "maxim", "maxim-password-123").status_code, 200)
+        self.assertEqual(self.login(opponent, "eva", "eva-password-123").status_code, 200)
+
+        for score_requester, score_opponent in ((2, 0), (1, 1)):
+            created = self.post(requester, "/api/requests", {
+                "sport": "chess", "opponent": "u8",
+                "scoreRequester": score_requester, "scoreOpponent": score_opponent,
+            })
+            self.assertEqual(created.status_code, 200, created.get_json())
+            accepted = self.post(opponent, f"/api/requests/{created.get_json()['id']}/accept")
+            self.assertEqual(accepted.status_code, 200, accepted.get_json())
+
+        invalid = self.post(requester, "/api/requests", {
+            "sport": "chess", "opponent": "u8", "scoreRequester": 1, "scoreOpponent": 0,
+        })
+        self.assertEqual(invalid.status_code, 400)
+        state = requester.get("/api/state").get_json()
+        chess_matches = [match for match in state["matches"] if match["sport"] == "chess"]
+        self.assertEqual(len(chess_matches), 2)
+        self.assertTrue(any(match["scoreOne"] == match["scoreTwo"] for match in chess_matches))
+        with db() as connection:
+            self.assertEqual(calculate_server_ratings(connection, "tennis")["u1"], 1000)
+            self.assertEqual(calculate_server_ratings(connection, "chess")["u1"], 1011)
+
+        admin = app.test_client()
+        self.assertEqual(self.login(admin, "admin", "test-admin-password-123").status_code, 200)
+        future = int(time.time() * 1000)
+        tournament = self.post(admin, "/api/admin/tournaments", {
+            "sport": "chess", "name": "Шахматный кубок", "description": "Тест",
+            "registrationDeadline": future + 3_600_000,
+            "startAt": future + 7_200_000, "maxPlayers": 2,
+        })
+        tournament_id = tournament.get_json()["id"]
+        self.assertEqual(self.post(requester, f"/api/tournaments/{tournament_id}/join").status_code, 200)
+        self.assertEqual(self.post(opponent, f"/api/tournaments/{tournament_id}/join").status_code, 200)
+        self.assertEqual(self.post(admin, f"/api/admin/tournaments/{tournament_id}/start").status_code, 200)
+        tournament_state = next(item for item in admin.get("/api/state").get_json()["tournaments"]
+                                if item["id"] == tournament_id)
+        tournament_match = next(item for item in tournament_state["matches"] if item["status"] == "pending")
+        draw = self.post(requester, "/api/requests", {
+            "sport": "chess", "opponent": "u8", "scoreRequester": 1, "scoreOpponent": 1,
+            "tournamentMatchId": tournament_match["id"],
+        })
+        self.assertEqual(draw.status_code, 400)
+        self.assertIn("побед", draw.get_json()["error"])
 
     def test_same_players_can_record_multiple_matches_in_one_day(self):
         requester = app.test_client()

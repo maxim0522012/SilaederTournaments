@@ -46,8 +46,12 @@ class Match(schema_db.Model):
     dispute_user = schema_db.Column(schema_db.Text)
     dispute_reason = schema_db.Column(schema_db.Text)
     tournament_match_id = schema_db.Column(schema_db.Text)
+    sport = schema_db.Column(schema_db.Text, nullable=False, server_default="tennis")
 
-    __table_args__ = (Index("idx_matches_created", "created_at"),)
+    __table_args__ = (
+        Index("idx_matches_created", "created_at"),
+        Index("idx_matches_sport_created", "sport", "created_at"),
+    )
 
 
 class MatchRequest(schema_db.Model):
@@ -64,6 +68,7 @@ class MatchRequest(schema_db.Model):
     created_at = schema_db.Column(schema_db.Integer, nullable=False)
     resolved_at = schema_db.Column(schema_db.Integer)
     tournament_match_id = schema_db.Column(schema_db.Text)
+    sport = schema_db.Column(schema_db.Text, nullable=False, server_default="tennis")
 
     __table_args__ = (
         Index("idx_requests_token", "token", unique=True),
@@ -88,6 +93,7 @@ class MatchChallenge(schema_db.Model):
     status = schema_db.Column(schema_db.Text, nullable=False, server_default="pending")
     created_at = schema_db.Column(schema_db.Integer, nullable=False)
     resolved_at = schema_db.Column(schema_db.Integer)
+    sport = schema_db.Column(schema_db.Text, nullable=False, server_default="tennis")
 
     __table_args__ = (
         Index("idx_match_challenges_opponent_status", "opponent", "status"),
@@ -138,6 +144,9 @@ class Tournament(schema_db.Model):
     created_by = schema_db.Column(schema_db.Text, schema_db.ForeignKey("users.id"), nullable=False)
     created_at = schema_db.Column(schema_db.Integer, nullable=False)
     completed_at = schema_db.Column(schema_db.Integer)
+    sport = schema_db.Column(schema_db.Text, nullable=False, server_default="tennis")
+
+    __table_args__ = (Index("idx_tournaments_sport_start", "sport", "start_at"),)
 
 
 class TournamentParticipant(schema_db.Model):

@@ -45,3 +45,15 @@ footer{border-top:1px solid var(--line);background:white;color:var(--muted);font
 /* Player profiles, challenges and admin review hints */
 .profile-modal{width:min(680px,calc(100% - 28px));max-height:90vh;overflow:auto}.profile-form-row,.head-to-head{display:flex;align-items:center;justify-content:space-between;gap:18px;margin:14px 0;padding:14px 16px;border:1px solid var(--line);border-radius:8px}.profile-form-row span,.head-to-head span,.head-to-head small{display:block;color:var(--muted);font-size:9px;text-transform:uppercase}.profile-form-row>strong{font-size:12px}.form-dots{display:flex;gap:5px;margin-top:7px}.form-dots i{width:24px;height:24px;display:grid;place-items:center;border-radius:50%;color:#fff;font-size:9px;font-style:normal;font-weight:900}.form-dots .win{background:var(--green)}.form-dots .loss{background:var(--red)}.head-to-head{background:var(--green-soft);border-color:#c5d8cc}.head-to-head strong{display:block;font-size:24px}.head-to-head small{text-transform:none}.profile-chart{margin:18px 0}.profile-chart h3{font-size:13px}.profile-chart canvas{display:block;width:100%;height:180px;border-radius:8px;background:#fbfcfa}.challenge-notifications{padding-top:8px}.accepted-challenge{border-left-color:#287a9b}.admin-security{margin-top:20px}.panel-note{margin:-5px 0 12px;color:var(--muted);font-size:10px}.security-alert{display:flex;gap:12px;align-items:flex-start;padding:13px 0;border-top:1px solid var(--line)}.security-alert:first-child{border-top:0}.security-mark{width:26px;height:26px;flex:0 0 26px;display:grid;place-items:center;border-radius:50%;background:#fff0d8;color:var(--amber);font-weight:900}.security-alert.high .security-mark{background:#f6e8e6;color:var(--red)}.security-alert strong{font-size:12px}.security-alert p{margin:3px 0 0;color:var(--muted);font-size:10px}
 @media(max-width:560px){.head-to-head,.profile-form-row{align-items:flex-start;flex-direction:column}.head-to-head .button{width:100%}}
+
+/* Sport switch and chess result states */
+.header-inner{gap:clamp(14px,3vw,45px)}
+.sport-switch{display:flex;flex:0 0 auto;padding:3px;border:1px solid var(--line);border-radius:8px;background:var(--surface-2)}
+.sport-switch button{border:0;border-radius:5px;background:transparent;padding:7px 11px;color:var(--muted);font-size:11px;font-weight:800}
+.sport-switch button.active{background:#fff;color:var(--green);box-shadow:0 1px 4px rgba(24,42,32,.12)}
+.player-summary-game.draw .summary-game-result{color:#f2cf79}
+.history-stats{grid-template-columns:repeat(auto-fit,minmax(150px,1fr))}
+.history-result.draw{background:#fff0d8;color:var(--amber)}
+.form-dots .draw{background:var(--amber)}
+@media(max-width:850px){.site-name>span{display:none}}
+@media(max-width:560px){.sport-switch button{padding:6px 8px;font-size:10px}.school-logo{width:36px;height:36px}.site-header nav{gap:0}.site-header nav a{padding:7px 8px;font-size:12px}}
