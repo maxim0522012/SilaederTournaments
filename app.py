@@ -3,14 +3,11 @@ import hashlib
 import io
 import json
 import os
-import re
 import secrets
-import smtplib
 import sqlite3
 import threading
 import time
 from datetime import timedelta
-from email.message import EmailMessage
 from functools import wraps
 from pathlib import Path
 from urllib.parse import urlencode, urlsplit
@@ -44,11 +41,11 @@ COOKIE_SECURE_SETTING = os.environ.get("SESSION_COOKIE_SECURE", "").strip().lowe
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "")
 SEED_DEMO_DATA = os.environ.get("SEED_DEMO_DATA", "false").lower() == "true"
 ALLOW_LOCAL_USER_LOGIN = os.environ.get("ALLOW_LOCAL_USER_LOGIN", "false").lower() == "true"
-TELEGRAM_BOT_TOKEN = os.environ.get("TELEGRAM_BOT_TOKEN", "").strip()
-TELEGRAM_BOT_USERNAME = os.environ.get("TELEGRAM_BOT_USERNAME", "").strip().lstrip("@").rstrip(".")
-TELEGRAM_PROXY_URL = os.environ.get("TELEGRAM_PROXY_URL", "").strip()
-TELEGRAM_ENABLED = bool(TELEGRAM_BOT_TOKEN and TELEGRAM_BOT_USERNAME)
 OIDC_ISSUER = os.environ.get("CRM_OIDC_ISSUER", "https://lk.silaeder.ru").rstrip("/")
+CRM_BASE_URL = os.environ.get("CRM_BASE_URL", OIDC_ISSUER).rstrip("/")
+CRM_NOTIFICATION_CLIENT_ID = (os.environ.get("CRM_CLIENT_ID") or os.environ.get("CRM_OIDC_CLIENT_ID") or "").strip()
+CRM_NOTIFICATION_CLIENT_SECRET = (os.environ.get("CRM_CLIENT_SECRET") or os.environ.get("CRM_OIDC_CLIENT_SECRET") or "").strip()
+EXTERNAL_NOTIFICATIONS_ENABLED = bool(CRM_NOTIFICATION_CLIENT_ID and CRM_NOTIFICATION_CLIENT_SECRET)
 OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and all(
     os.environ.get(key) for key in ("SECRET_KEY", "CRM_OIDC_CLIENT_ID", "CRM_OIDC_CLIENT_SECRET")
 )
@@ -126,26 +123,6 @@ def clean_email(value):
     if not local_part or not domain or domain.startswith(".") or domain.endswith("."):
         raise ValueError("Укажите корректный адрес электронной почты.")
     return email
-
-
-def clean_telegram_username(value):
-    username = str(value or "").strip().lstrip("@").lower()
-    if not re.fullmatch(r"[a-z][a-z0-9_]{4,31}", username):
-        raise ValueError("Ник Telegram должен начинаться с латинской буквы и содержать 5–32 буквы, цифры или знак подчёркивания.")
-    return username
-
-
-def telegram_proxy_settings():
-    if not TELEGRAM_PROXY_URL:
-        return None
-    try:
-        parsed = urlsplit(TELEGRAM_PROXY_URL)
-        valid = parsed.scheme.lower() in {"socks5", "socks5h"} and parsed.hostname and parsed.port
-    except ValueError:
-        valid = False
-    if not valid:
-        raise RuntimeError("TELEGRAM_PROXY_URL должен иметь вид socks5h://host:port или socks5://host:port.")
-    return {"http": TELEGRAM_PROXY_URL, "https": TELEGRAM_PROXY_URL}
 
 
 def login_key(login):
@@ -289,12 +266,8 @@ def serialize_user(row, viewer):
     data = {"id": row["id"], "firstName": row["first_name"], "lastName": row["last_name"],
             "status": row["status"], "isPlayer": bool(row["is_player"])}
     if can_see_full:
-        telegram_username = row["telegram_username"] if "telegram_username" in row.keys() else ""
-        telegram_chat_id = row["telegram_chat_id"] if "telegram_chat_id" in row.keys() else None
         data.update(className=row["class_name"], login=row["login"],
                     email=row["email"] if "email" in row.keys() else "",
-                    telegramUsername=telegram_username or "",
-                    telegramConnected=bool(telegram_chat_id),
                     role=row["role"], createdAt=row["created_at"])
     return data
 
@@ -312,6 +285,51 @@ def calculate_server_ratings(connection):
         ratings[match["player_one"]] += delta
         ratings[match["player_two"]] -= delta
     return ratings
+
+
+def suspicious_activity(connection):
+    """Build review hints for admins without automatically punishing players."""
+    alerts = []
+    cutoff_day = now_ms() - 24 * 60 * 60 * 1000
+    cutoff_week = now_ms() - 7 * 24 * 60 * 60 * 1000
+    frequent = connection.execute(
+        """SELECT CASE WHEN requester<opponent THEN requester ELSE opponent END AS first_id,
+                  CASE WHEN requester<opponent THEN opponent ELSE requester END AS second_id,
+                  COUNT(*) AS total
+             FROM requests WHERE status='accepted' AND resolved_at>=?
+            GROUP BY first_id,second_id HAVING COUNT(*)>=4 ORDER BY total DESC""",
+        (cutoff_day,),
+    ).fetchall()
+    for row in frequent:
+        alerts.append({"kind": "frequent_pair", "severity": "high", "title": "Частые матчи одной пары",
+                       "details": f"За 24 часа подтверждено матчей: {row['total']}",
+                       "userIds": [row["first_id"], row["second_id"]], "count": row["total"]})
+
+    repeated = connection.execute(
+        """SELECT CASE WHEN requester<opponent THEN requester ELSE opponent END AS first_id,
+                  CASE WHEN requester<opponent THEN opponent ELSE requester END AS second_id,
+                  MIN(score_requester,score_opponent) AS low_score,
+                  MAX(score_requester,score_opponent) AS high_score,COUNT(*) AS total
+             FROM requests WHERE status='accepted' AND resolved_at>=?
+            GROUP BY first_id,second_id,low_score,high_score HAVING COUNT(*)>=3 ORDER BY total DESC""",
+        (cutoff_week,),
+    ).fetchall()
+    for row in repeated:
+        alerts.append({"kind": "repeated_score", "severity": "medium", "title": "Повторяющийся счёт",
+                       "details": f"Счёт {row['high_score']}:{row['low_score']} повторился {row['total']} раза за 7 дней",
+                       "userIds": [row["first_id"], row["second_id"]], "count": row["total"]})
+
+    fast = connection.execute(
+        """SELECT requester,opponent,COUNT(*) AS total FROM requests
+            WHERE status='accepted' AND resolved_at>=? AND resolved_at-created_at<=30000
+            GROUP BY requester,opponent HAVING COUNT(*)>=3 ORDER BY total DESC""",
+        (cutoff_week,),
+    ).fetchall()
+    for row in fast:
+        alerts.append({"kind": "fast_confirmation", "severity": "medium", "title": "Слишком быстрые подтверждения",
+                       "details": f"Подтверждений быстрее 30 секунд: {row['total']}",
+                       "userIds": [row["requester"], row["opponent"]], "count": row["total"]})
+    return alerts[:20]
 
 
 def create_tournament_round(connection, tournament_id, stage, players, initial=False):
@@ -557,11 +575,19 @@ def state():
         users = [serialize_user(row, viewer) for row in user_rows]
         matches = [dict(row) for row in match_rows]
         requests_rows = []
+        challenge_rows = []
+        security_alerts = []
         if viewer:
             if viewer["role"] == "admin":
                 rows = connection.execute("SELECT * FROM requests ORDER BY created_at").fetchall()
+                challenge_rows = connection.execute("SELECT * FROM match_challenges ORDER BY created_at DESC").fetchall()
+                security_alerts = suspicious_activity(connection)
             else:
                 rows = connection.execute("SELECT * FROM requests WHERE requester=? OR opponent=? ORDER BY created_at", (viewer["id"], viewer["id"])).fetchall()
+                challenge_rows = connection.execute(
+                    "SELECT * FROM match_challenges WHERE challenger=? OR opponent=? ORDER BY created_at DESC",
+                    (viewer["id"], viewer["id"]),
+                ).fetchall()
             requests_rows = [dict(row) for row in rows]
         tournaments = serialize_tournaments(connection)
     matches_json = []
@@ -580,10 +606,15 @@ def state():
                       "scoreRequester":r["score_requester"],"scoreOpponent":r["score_opponent"],
                       "status":r["status"],"notified":bool(r["notified"]),"createdAt":r["created_at"],
                       "tournamentMatchId":r.get("tournament_match_id")} for r in requests_rows]
-    return jsonify(users=users, matches=matches_json, requests=requests_json, tournaments=tournaments,
+    challenges_json = [{"id":r["id"], "challenger":r["challenger"], "opponent":r["opponent"],
+                        "scheduledAt":r["scheduled_at"], "message":r["message"], "status":r["status"],
+                        "createdAt":r["created_at"], "resolvedAt":r["resolved_at"]} for r in challenge_rows]
+    return jsonify(users=users, matches=matches_json, requests=requests_json, challenges=challenges_json,
+                   securityAlerts=security_alerts, tournaments=tournaments,
                    currentUserId=viewer["id"] if viewer else None,
                    oidcEnabled=OIDC_ENABLED, oidcSession=bool(session.get("oidc_login")),
-                   localLoginEnabled=ALLOW_LOCAL_USER_LOGIN, telegramEnabled=TELEGRAM_ENABLED,
+                   localLoginEnabled=ALLOW_LOCAL_USER_LOGIN,
+                   externalNotificationsEnabled=EXTERNAL_NOTIFICATIONS_ENABLED,
                    csrfToken=csrf_token, authMessage=session.pop("auth_message", None))
 
 
@@ -625,128 +656,71 @@ def update_user_from_oidc(connection, user_id, claims):
         connection.execute("UPDATE users SET first_name=?,last_name=?,class_name=?,role=?,status=CASE WHEN status='pending' THEN 'active' ELSE status END WHERE id=?", values[:4] + (user_id,))
 
 
-def mail_configured():
-    return all(os.environ.get(key) for key in ("MAIL_HOST", "MAIL_FROM"))
+class ExternalNotificationError(RuntimeError):
+    def __init__(self, message, status_code=None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
-def send_email_message(message):
-    host = os.environ["MAIL_HOST"]
-    port = int(os.environ.get("MAIL_PORT", "587"))
-    with smtplib.SMTP(host, port, timeout=15) as smtp:
-        if os.environ.get("MAIL_USE_TLS", "true").lower() == "true":
-            smtp.starttls()
-        if os.environ.get("MAIL_USERNAME"):
-            smtp.login(os.environ["MAIL_USERNAME"], os.environ.get("MAIL_PASSWORD", ""))
-        smtp.send_message(message)
+def notification_recipient_sub(connection, user_id):
+    row = connection.execute(
+        "SELECT subject FROM oidc_identities WHERE user_id=? AND issuer=? ORDER BY created_at DESC LIMIT 1",
+        (user_id, OIDC_ISSUER),
+    ).fetchone()
+    return row["subject"] if row else None
 
 
-def send_link_email(recipient, raw_token):
-    message = EmailMessage()
-    message["Subject"] = "Подтверждение входа в рейтинг настольного тенниса"
-    message["From"] = os.environ["MAIL_FROM"]
-    message["To"] = recipient
-    message.set_content(f"Для привязки аккаунта ЛК Силаэдра перейдите по ссылке в течение 30 минут:\n\n{APP_URL}/auth/silaeder/link/{raw_token}\n")
-    send_email_message(message)
+def safe_notification_url(path):
+    url = f"{EXTERNAL_URL}{path}"
+    parsed = urlsplit(url)
+    if parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname in {"localhost", "127.0.0.1"}):
+        return url
+    return None
 
 
-def send_match_notification_email(recipient, requester_name, opponent_name, score_requester, score_opponent, token):
-    confirmation_url = f"{EXTERNAL_URL}/confirm/{token}"
-    message = EmailMessage()
-    message["Subject"] = "Подтвердите результат матча по настольному теннису"
-    message["From"] = os.environ["MAIL_FROM"]
-    message["To"] = recipient
-    message.set_content(
-        f"Здравствуйте, {opponent_name}!\n\n"
-        f"{requester_name} указал результат вашего матча: {score_requester}:{score_opponent}.\n"
-        "Перейдите по ссылке, чтобы подтвердить или отклонить результат:\n\n"
-        f"{confirmation_url}\n\n"
-        "Если вы не играли этот матч, отклоните заявку на сайте."
-    )
-    send_email_message(message)
-
-
-def telegram_api_call(method, payload=None, timeout=15):
-    try:
-        response = http_requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/{method}",
-            json=payload or {},
-            timeout=timeout,
-            proxies=telegram_proxy_settings(),
-        )
-        response.raise_for_status()
-        result = response.json()
-    except (http_requests.RequestException, ValueError) as error:
-        raise RuntimeError(f"Не удалось выполнить запрос к Telegram Bot API ({type(error).__name__}).") from None
-    if not result.get("ok"):
-        raise RuntimeError(result.get("description") or "Telegram Bot API отклонил запрос.")
-    return result.get("result")
-
-
-def send_telegram_message(chat_id, text):
-    telegram_api_call(
-        "sendMessage",
-        {"chat_id": chat_id, "text": text, "disable_web_page_preview": True},
-    )
-
-
-def process_telegram_update(update):
-    message = update.get("message") or {}
-    sender = message.get("from") or {}
-    chat = message.get("chat") or {}
-    text = str(message.get("text") or "").strip()
-    chat_id = str(chat.get("id") or "")
-    username = str(sender.get("username") or "").strip().lower()
-    if not chat_id or not text.startswith("/start"):
-        return False
-    parts = text.split(maxsplit=1)
-    token = parts[1].strip() if len(parts) == 2 else ""
-    with db() as connection:
-        user = connection.execute(
-            "SELECT id,first_name,telegram_username FROM users WHERE telegram_link_token=?", (token,)
-        ).fetchone() if token else None
-        if not user:
-            connected = connection.execute(
-                "SELECT first_name FROM users WHERE telegram_chat_id=? AND telegram_username=?",
-                (chat_id, username),
-            ).fetchone() if username else None
-            if connected:
-                reply = f"Telegram уже подключён, {connected['first_name']}. Уведомления будут приходить в этот чат."
-            else:
-                reply = "Ссылка подключения недействительна. Создайте новую ссылку в профиле сайта."
-        elif not username or username != user["telegram_username"]:
-            reply = "Ник Telegram не совпадает с указанным на сайте. Проверьте ник и повторите подключение."
-        else:
-            connection.execute(
-                "UPDATE users SET telegram_chat_id=?,telegram_link_token=NULL WHERE id=?", (chat_id, user["id"])
+def send_external_notification(recipient_sub, event_key, title, message, url=None):
+    if not EXTERNAL_NOTIFICATIONS_ENABLED:
+        raise ExternalNotificationError("API уведомлений ЛК не настроен.")
+    payload = {"recipient_sub": recipient_sub, "title": title.strip(), "message": message.strip()}
+    if url:
+        payload["url"] = url
+    headers = {"Idempotency-Key": event_key}
+    last_error = None
+    for attempt in range(3):
+        try:
+            response = http_requests.post(
+                f"{CRM_BASE_URL}/api/external/notifications",
+                auth=(CRM_NOTIFICATION_CLIENT_ID, CRM_NOTIFICATION_CLIENT_SECRET),
+                headers=headers,
+                json=payload,
+                timeout=10,
             )
-            reply = f"Готово, {user['first_name']}! Уведомления о матчах будут приходить в этот чат."
-    send_telegram_message(chat_id, reply)
-    return True
-
-
-@app.post("/api/profile/telegram")
-@require_user
-def save_telegram_profile(user):
-    data = request.get_json(silent=True) or {}
-    try:
-        username = clean_telegram_username(data.get("username"))
-    except ValueError as error:
-        return jsonify(error=str(error)), 400
-    try:
-        with db() as connection:
-            current = connection.execute(
-                "SELECT telegram_username,telegram_chat_id,telegram_link_token FROM users WHERE id=?", (user["id"],)
-            ).fetchone()
-            changed = current["telegram_username"] != username
-            link_token = current["telegram_link_token"] or secrets.token_urlsafe(18)
-            connection.execute(
-                "UPDATE users SET telegram_username=?,telegram_chat_id=?,telegram_link_token=? WHERE id=?",
-                (username, None if changed else current["telegram_chat_id"], link_token, user["id"]),
-            )
-    except sqlite3.IntegrityError:
-        return jsonify(error="Этот ник Telegram уже указан в другом аккаунте."), 409
-    link = f"https://t.me/{TELEGRAM_BOT_USERNAME}?start={link_token}" if TELEGRAM_ENABLED else None
-    return jsonify(ok=True,link=link,telegramEnabled=TELEGRAM_ENABLED)
+        except http_requests.RequestException as error:
+            last_error = error
+            if attempt < 2:
+                time.sleep(0.2 * (2 ** attempt) + secrets.randbelow(100) / 1000)
+                continue
+            raise ExternalNotificationError("ЛК Силаэдра временно недоступен.") from None
+        if response.status_code in {200, 202}:
+            try:
+                return response.json()
+            except ValueError:
+                return {"status": "queued", "idempotent_replay": response.status_code == 200}
+        if response.status_code == 429 or response.status_code >= 500:
+            if attempt < 2:
+                retry_after = response.headers.get("Retry-After", "")
+                try:
+                    delay = min(max(float(retry_after), 0), 2)
+                except ValueError:
+                    delay = 0.2 * (2 ** attempt) + secrets.randbelow(100) / 1000
+                time.sleep(delay)
+                continue
+        try:
+            error_message = response.json().get("message")
+        except ValueError:
+            error_message = None
+        raise ExternalNotificationError(error_message or "ЛК Силаэдра отклонил уведомление.", response.status_code)
+    raise ExternalNotificationError(str(last_error) if last_error else "Не удалось поставить уведомление в очередь.")
 
 
 @app.get("/auth/silaeder/login")
@@ -779,15 +753,20 @@ def silaeder_callback():
             else:
                 existing = connection.execute("SELECT id FROM users WHERE email IS NOT NULL AND lower(email)=lower(?)", (claims["email"],)).fetchone() if claims["email"] else None
                 if existing:
-                    if not mail_configured():
-                        session["auth_message"] = "Аккаунт с таким email уже существует. Для безопасной привязки администратору нужно настроить отправку почты."
+                    if not EXTERNAL_NOTIFICATIONS_ENABLED:
+                        session["auth_message"] = "Аккаунт с таким email уже существует. Для безопасной привязки администратору нужно настроить API уведомлений ЛК."
                         return redirect("/#home")
                     raw_token = secrets.token_urlsafe(32)
                     token_hash = hashlib.sha256(raw_token.encode()).hexdigest()
                     connection.execute("DELETE FROM account_link_tokens WHERE expires_at<?", (now_ms(),))
                     connection.execute("INSERT OR REPLACE INTO account_link_tokens VALUES(?,?,?,?,?,?)", (token_hash, existing["id"], claims["issuer"], claims["subject"], json.dumps(claims, ensure_ascii=False), now_ms() + 30 * 60 * 1000))
-                    send_link_email(claims["email"], raw_token)
-                    session["auth_message"] = "Мы отправили на ваш email ссылку для безопасной привязки аккаунта. Она действует 30 минут."
+                    send_external_notification(
+                        claims["subject"], f"tennis.account-link.{token_hash[:32]}",
+                        "Подтвердите привязку аккаунта",
+                        "Подтвердите привязку существующего аккаунта к ЛК Силаэдра. Ссылка действует 30 минут.",
+                        safe_notification_url(f"/auth/silaeder/link/{raw_token}"),
+                    )
+                    session["auth_message"] = "Уведомление для безопасной привязки отправлено через ЛК Силаэдра. Оно действует 30 минут."
                     return redirect("/#home")
                 user_id = f"u-{secrets.token_hex(8)}"
                 login = f"oidc-{hashlib.sha256((claims['issuer'] + claims['subject']).encode()).hexdigest()[:16]}"
@@ -1081,9 +1060,8 @@ def create_request(user):
 def notify_request(user,rid):
     with db() as connection:
         row=connection.execute(
-            """SELECT r.*,opponent.email AS opponent_email,opponent.first_name AS opponent_first_name,
-                      opponent.last_name AS opponent_last_name,opponent.telegram_username AS opponent_telegram_username,
-                      opponent.telegram_chat_id AS opponent_telegram_chat_id
+            """SELECT r.*,opponent.first_name AS opponent_first_name,
+                      opponent.last_name AS opponent_last_name
                  FROM requests r JOIN users opponent ON opponent.id=r.opponent
                 WHERE r.id=? AND r.requester=? AND r.status='pending'""",
             (rid,user["id"]),
@@ -1091,43 +1069,24 @@ def notify_request(user,rid):
         if not row:
             return jsonify(error="Заявка не найдена."),404
         connection.execute("UPDATE requests SET notified=1 WHERE id=?",(rid,))
-
-    email_status = "no_email"
-    if row["opponent_email"]:
-        if not mail_configured():
-            email_status = "not_configured"
-        else:
-            try:
-                send_match_notification_email(
-                    row["opponent_email"],
-                    f"{user['first_name']} {user['last_name']}",
-                    f"{row['opponent_first_name']} {row['opponent_last_name']}",
-                    row["score_requester"],row["score_opponent"],row["token"],
-                )
-                email_status = "sent"
-            except Exception:
-                app.logger.exception("Match notification email failed")
-                email_status = "failed"
-    telegram_status = "no_username"
-    if row["opponent_telegram_username"]:
-        if not TELEGRAM_ENABLED:
-            telegram_status = "not_configured"
-        elif not row["opponent_telegram_chat_id"]:
-            telegram_status = "not_connected"
-        else:
-            try:
-                send_telegram_message(
-                    row["opponent_telegram_chat_id"],
-                    f"Новый результат матча\n\n{user['first_name']} {user['last_name']} указал счёт "
-                    f"{row['score_requester']}:{row['score_opponent']}.\n\n"
-                    f"Подтвердить или отклонить: {EXTERNAL_URL}/confirm/{row['token']}",
-                )
-                telegram_status = "sent"
-            except Exception:
-                app.logger.exception("Match notification Telegram delivery failed")
-                telegram_status = "failed"
-    return jsonify(ok=True,emailSent=email_status=="sent",emailStatus=email_status,
-                   telegramSent=telegram_status=="sent",telegramStatus=telegram_status)
+        recipient_sub = notification_recipient_sub(connection, row["opponent"])
+    if not recipient_sub:
+        return jsonify(ok=True, notificationStatus="no_oidc", queued=False)
+    try:
+        result = send_external_notification(
+            recipient_sub,
+            f"tennis.match-request.{rid}",
+            "Подтвердите результат матча",
+            f"Ваш соперник указал результат матча: {row['score_requester']}:{row['score_opponent']}. "
+            "Подтвердите или отклоните его на сайте.",
+            safe_notification_url(f"/confirm/{row['token']}"),
+        )
+        return jsonify(ok=True, notificationStatus="queued", queued=True,
+                       idempotentReplay=bool(result.get("idempotent_replay")))
+    except ExternalNotificationError as error:
+        app.logger.warning("External match notification failed with status %s", error.status_code)
+        return jsonify(ok=True, notificationStatus="not_configured" if not EXTERNAL_NOTIFICATIONS_ENABLED else "failed",
+                       queued=False)
 
 
 @app.get("/api/requests/<rid>/qr")
@@ -1147,46 +1106,121 @@ def request_qr(user, rid):
     return response
 
 
+def resolve_match_request(connection, request_id, opponent_id, action):
+    if action not in {"accept", "reject"}:
+        raise ValueError("Неизвестное действие.")
+    row = connection.execute(
+        "SELECT * FROM requests WHERE id=? AND opponent=? AND status='pending'", (request_id, opponent_id)
+    ).fetchone()
+    if not row:
+        raise LookupError("Заявка не найдена или уже обработана.")
+    tournament_match = None
+    if action == "accept":
+        match_id = f"m-{secrets.token_hex(8)}"
+        if row["tournament_match_id"]:
+            tournament_match = connection.execute(
+                """SELECT tm.*,t.status AS tournament_status FROM tournament_matches tm
+                   JOIN tournaments t ON t.id=tm.tournament_id WHERE tm.id=?""", (row["tournament_match_id"],)
+            ).fetchone()
+            if not tournament_match or tournament_match["status"] != "pending" or tournament_match["tournament_status"] != "active":
+                raise ValueError("Турнирный матч уже закрыт.")
+        connection.execute(
+            """INSERT INTO matches(
+                 id,player_one,player_two,score_one,score_two,confirmed_by,created_at,active,
+                 dispute_user,dispute_reason,tournament_match_id
+               ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+            (match_id,row["requester"],row["opponent"],row["score_requester"],row["score_opponent"],
+             opponent_id,now_ms(),1,None,None,row["tournament_match_id"]),
+        )
+        if tournament_match:
+            winner = row["requester"] if row["score_requester"] > row["score_opponent"] else row["opponent"]
+            loser = row["opponent"] if winner == row["requester"] else row["requester"]
+            connection.execute(
+                """UPDATE tournament_matches SET winner=?,loser=?,status='completed',result_match_id=?,completed_at=?
+                   WHERE id=? AND status='pending'""",
+                (winner,loser,match_id,now_ms(),row["tournament_match_id"]),
+            )
+            connection.execute(
+                """UPDATE tournament_participants
+                   SET losses=losses+1,eliminated=CASE WHEN losses+1>=2 THEN 1 ELSE 0 END
+                   WHERE tournament_id=? AND user_id=?""",
+                (tournament_match["tournament_id"],loser),
+            )
+            advance_tournament(connection,tournament_match["tournament_id"])
+    connection.execute(
+        "UPDATE requests SET status=?,resolved_at=? WHERE id=?",
+        ("accepted" if action == "accept" else "rejected", now_ms(), request_id),
+    )
+    return row
+
+
 @app.post("/api/requests/<rid>/<action>")
 @require_user
 def resolve_request(user,rid,action):
-    if action not in {"accept","reject"}: return jsonify(error="Неизвестное действие."),400
     with db() as connection:
-        row=connection.execute("SELECT * FROM requests WHERE id=? AND opponent=? AND status='pending'",(rid,user["id"])).fetchone()
-        if not row: return jsonify(error="Заявка не найдена или уже обработана."),404
-        if action=="accept":
-            match_id=f"m-{secrets.token_hex(8)}"
-            if row["tournament_match_id"]:
-                tournament_match=connection.execute(
-                    """SELECT tm.*,t.status AS tournament_status FROM tournament_matches tm
-                       JOIN tournaments t ON t.id=tm.tournament_id WHERE tm.id=?""", (row["tournament_match_id"],)
-                ).fetchone()
-                if not tournament_match or tournament_match["status"]!="pending" or tournament_match["tournament_status"]!="active":
-                    return jsonify(error="Турнирный матч уже закрыт."),409
-            connection.execute(
-                """INSERT INTO matches(
-                     id,player_one,player_two,score_one,score_two,confirmed_by,created_at,active,
-                     dispute_user,dispute_reason,tournament_match_id
-                   ) VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
-                (match_id,row["requester"],row["opponent"],row["score_requester"],row["score_opponent"],
-                 user["id"],now_ms(),1,None,None,row["tournament_match_id"]),
+        try:
+            resolve_match_request(connection, rid, user["id"], action)
+        except LookupError as error:
+            return jsonify(error=str(error)), 404
+        except ValueError as error:
+            return jsonify(error=str(error)), 409 if "закрыт" in str(error) else 400
+    return jsonify(ok=True)
+
+
+@app.post("/api/challenges")
+@require_user
+def create_challenge(user):
+    data = request.get_json(silent=True) or {}
+    opponent = data.get("opponent")
+    try:
+        scheduled_at = int(data.get("scheduledAt"))
+        message = clean_text(data.get("message"), "Комментарий", 250, required=False)
+    except (TypeError, ValueError) as error:
+        return jsonify(error=str(error) if isinstance(error, ValueError) else "Укажите дату и время матча."), 400
+    if not user["is_player"] or opponent == user["id"] or not isinstance(opponent, str) or len(opponent) > 80:
+        return jsonify(error="Выберите другого активного игрока."), 400
+    if scheduled_at < now_ms() - 5 * 60 * 1000 or scheduled_at > now_ms() + 90 * 24 * 60 * 60 * 1000:
+        return jsonify(error="Дата матча должна быть в пределах ближайших 90 дней."), 400
+    with db() as connection:
+        target = connection.execute(
+            "SELECT * FROM users WHERE id=? AND status='active' AND is_player=1", (opponent,)
+        ).fetchone()
+        if not target:
+            return jsonify(error="Игрок не найден."), 404
+        challenge_id = f"c-{secrets.token_hex(8)}"
+        connection.execute(
+            "INSERT INTO match_challenges(id,challenger,opponent,scheduled_at,message,created_at) VALUES(?,?,?,?,?,?)",
+            (challenge_id, user["id"], opponent, scheduled_at, message, now_ms()),
+        )
+    with db() as connection:
+        recipient_sub = notification_recipient_sub(connection, opponent)
+    if recipient_sub:
+        try:
+            send_external_notification(
+                recipient_sub, f"tennis.challenge.{challenge_id}", "Вызов на матч",
+                f"{user['first_name']} {user['last_name']} предлагает сыграть в настольный теннис. Откройте сайт, чтобы принять или отклонить вызов.",
+                safe_notification_url("/#home"),
             )
-            if row["tournament_match_id"]:
-                winner = row["requester"] if row["score_requester"] > row["score_opponent"] else row["opponent"]
-                loser = row["opponent"] if winner == row["requester"] else row["requester"]
-                connection.execute(
-                    """UPDATE tournament_matches SET winner=?,loser=?,status='completed',result_match_id=?,completed_at=?
-                       WHERE id=? AND status='pending'""",
-                    (winner,loser,match_id,now_ms(),row["tournament_match_id"]),
-                )
-                connection.execute(
-                    """UPDATE tournament_participants
-                       SET losses=losses+1,eliminated=CASE WHEN losses+1>=2 THEN 1 ELSE 0 END
-                       WHERE tournament_id=? AND user_id=?""",
-                    (tournament_match["tournament_id"],loser),
-                )
-                advance_tournament(connection,tournament_match["tournament_id"])
-        connection.execute("UPDATE requests SET status=?,resolved_at=? WHERE id=?",("accepted" if action=="accept" else "rejected",now_ms(),rid))
+        except ExternalNotificationError as error:
+            app.logger.warning("External challenge notification failed with status %s", error.status_code)
+    return jsonify(id=challenge_id)
+
+
+@app.post("/api/challenges/<challenge_id>/<action>")
+@require_user
+def resolve_challenge(user, challenge_id, action):
+    if action not in {"accept", "reject", "cancel"}:
+        return jsonify(error="Неизвестное действие."), 400
+    with db() as connection:
+        row = connection.execute("SELECT * FROM match_challenges WHERE id=? AND status='pending'", (challenge_id,)).fetchone()
+        if not row:
+            return jsonify(error="Вызов не найден или уже обработан."), 404
+        if action == "cancel" and row["challenger"] != user["id"]:
+            return jsonify(error="Отменить вызов может только его автор."), 403
+        if action in {"accept", "reject"} and row["opponent"] != user["id"]:
+            return jsonify(error="Ответить на вызов может только соперник."), 403
+        status = {"accept": "accepted", "reject": "rejected", "cancel": "cancelled"}[action]
+        connection.execute("UPDATE match_challenges SET status=?,resolved_at=? WHERE id=?", (status, now_ms(), challenge_id))
     return jsonify(ok=True)
 
 
@@ -1249,47 +1283,6 @@ def seed_local_demo_command():
     seed_local_demo_users()
     print("Создано 12 локальных учеников: student01–student12, пароль 123456")
 
-
-@app.cli.command("telegram-polling")
-def telegram_polling_command():
-    """Continuously receive Telegram updates without a public webhook."""
-    if not TELEGRAM_ENABLED:
-        raise RuntimeError("Задайте TELEGRAM_BOT_TOKEN и TELEGRAM_BOT_USERNAME.")
-    telegram_api_call("deleteWebhook", {"drop_pending_updates": False})
-    with db() as connection:
-        state = connection.execute(
-            "SELECT update_offset FROM telegram_polling_state WHERE id=1"
-        ).fetchone()
-        offset = int(state["update_offset"]) if state else 0
-    print(f"Telegram polling запущен для @{TELEGRAM_BOT_USERNAME}")
-    retry_delay = 1
-    while True:
-        try:
-            updates = telegram_api_call(
-                "getUpdates",
-                {"offset": offset, "timeout": 30, "allowed_updates": ["message"]},
-                timeout=40,
-            ) or []
-            for update in updates:
-                update_id = int(update.get("update_id", -1))
-                if update_id < offset:
-                    continue
-                process_telegram_update(update)
-                offset = update_id + 1
-                with db() as connection:
-                    connection.execute(
-                        "INSERT INTO telegram_polling_state(id,update_offset) VALUES(1,?) "
-                        "ON CONFLICT(id) DO UPDATE SET update_offset=excluded.update_offset",
-                        (offset,),
-                    )
-            retry_delay = 1
-        except KeyboardInterrupt:
-            print("Telegram polling остановлен")
-            break
-        except Exception:
-            app.logger.exception("Telegram polling failed; retrying")
-            time.sleep(retry_delay)
-            retry_delay = min(retry_delay * 2, 30)
 
 if __name__ == "__main__":
     with app.app_context():

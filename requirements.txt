@@ -5,5 +5,4 @@ waitress==3.0.2
 Authlib==1.7.2
 python-dotenv==1.1.1
 requests==2.34.2
-PySocks==1.7.1
 qrcode==8.2

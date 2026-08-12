@@ -26,20 +26,10 @@ class User(schema_db.Model):
     is_player = schema_db.Column(schema_db.Integer, nullable=False, server_default="1")
     created_at = schema_db.Column(schema_db.Integer, nullable=False)
     email = schema_db.Column(schema_db.Text)
-    telegram_username = schema_db.Column(schema_db.Text)
-    telegram_chat_id = schema_db.Column(schema_db.Text)
-    telegram_link_token = schema_db.Column(schema_db.Text)
 
     # SQLite cannot reflect expression indexes reliably. The case-insensitive
     # email index is therefore maintained explicitly by the Alembic migration.
     __table_args__ = (Index("idx_users_login", "login", unique=True),)
-
-
-class TelegramPollingState(schema_db.Model):
-    __tablename__ = "telegram_polling_state"
-
-    id = schema_db.Column(schema_db.Integer, primary_key=True)
-    update_offset = schema_db.Column(schema_db.BigInteger, nullable=False, server_default="0")
 
 
 class Match(schema_db.Model):
@@ -84,6 +74,24 @@ class MatchRequest(schema_db.Model):
             unique=True,
             sqlite_where=text("tournament_match_id IS NOT NULL AND status='pending'"),
         ),
+    )
+
+
+class MatchChallenge(schema_db.Model):
+    __tablename__ = "match_challenges"
+
+    id = schema_db.Column(schema_db.Text, primary_key=True, nullable=True)
+    challenger = schema_db.Column(schema_db.Text, schema_db.ForeignKey("users.id"), nullable=False)
+    opponent = schema_db.Column(schema_db.Text, schema_db.ForeignKey("users.id"), nullable=False)
+    scheduled_at = schema_db.Column(schema_db.Integer, nullable=False)
+    message = schema_db.Column(schema_db.Text, nullable=False, server_default="")
+    status = schema_db.Column(schema_db.Text, nullable=False, server_default="pending")
+    created_at = schema_db.Column(schema_db.Integer, nullable=False)
+    resolved_at = schema_db.Column(schema_db.Integer)
+
+    __table_args__ = (
+        Index("idx_match_challenges_opponent_status", "opponent", "status"),
+        Index("idx_match_challenges_challenger_status", "challenger", "status"),
     )
 
 

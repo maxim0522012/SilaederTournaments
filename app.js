@@ -1,7 +1,7 @@
 const ELO_START = 1000;
 const ELO_K = 24;
 
-let db = {users:[],matches:[],requests:[],tournaments:[],currentUserId:null};
+let db = {users:[],matches:[],requests:[],challenges:[],securityAlerts:[],tournaments:[],currentUserId:null};
 let ratingCache = {};
 let opponentOptions = [];
 let selectedTournamentId = null;
@@ -61,6 +61,7 @@ function renderAccount(){
   document.querySelector('#admin-nav').hidden=me?.role!=='admin';
   document.querySelector('#history-nav').hidden=!me?.isPlayer;
   const area=document.querySelector('#account-area');
+  area.classList.toggle('guest',!me); document.querySelector('.header-inner').classList.toggle('guest-header',!me);
   if(!me){ area.innerHTML='<button class="login-button" data-action="open-auth">Войти</button>'; return; }
   area.innerHTML=`<button class="account-button" data-profile="${me.id}" title="Открыть профиль"><span class="account-avatar">${escapeHtml(initials(me))}</span><span class="account-name">${escapeHtml(me.firstName)}<small>${me.status==='pending'?'Ожидает подтверждения':me.role==='admin'?'Администратор':me.role==='teacher'?'Учитель':escapeHtml(me.className)}</small></span></button><button class="text-action" data-action="logout">Выйти</button>`;
 }
@@ -115,7 +116,7 @@ function renderHistory(){
     return;
   }
 
-  const stats=ratingCache[me.id]||{games:0,wins:0,losses:0};
+  const stats=ratingCache[me.id]||{rating:ELO_START,games:0,wins:0,losses:0,history:[]};
   const matches=db.matches
     .filter(match=>match.active&&(match.playerOne===me.id||match.playerTwo===me.id))
     .sort((a,b)=>b.createdAt-a.createdAt);
@@ -135,6 +136,8 @@ function renderHistory(){
       <td><span class="history-delta ${delta>=0?'positive':'negative'}">${delta>=0?'+':''}${delta}</span></td>
     </tr>`;
   }).join('')||'<tr><td colspan="6" class="empty">Сыгранных матчей пока нет</td></tr>';
+  const ratings=[ELO_START,...(stats.history||[]).map(item=>item.rating)];
+  const minimum=Math.min(...ratings),maximum=Math.max(...ratings);
 
   content.innerHTML=`
     <div class="history-stats">
@@ -142,12 +145,57 @@ function renderHistory(){
       <div class="history-stat wins"><strong>${stats.wins}</strong><span>Побед</span></div>
       <div class="history-stat losses"><strong>${stats.losses}</strong><span>Поражений</span></div>
     </div>
+    <section class="rating-chart-card" aria-labelledby="rating-chart-title">
+      <div class="rating-chart-heading">
+        <div><p class="kicker">ДИНАМИКА ELO</p><h2 id="rating-chart-title">Ваш рейтинг</h2></div>
+        <div class="rating-chart-summary">
+          <span><small>Сейчас</small><strong>${stats.rating}</strong></span>
+          <span><small>Минимум</small><strong>${minimum}</strong></span>
+          <span><small>Максимум</small><strong>${maximum}</strong></span>
+        </div>
+      </div>
+      <div class="rating-chart-canvas-wrap">
+        <canvas id="rating-history-chart" role="img" aria-label="График изменения рейтинга от ${ELO_START} до ${stats.rating} Elo"></canvas>
+      </div>
+      ${stats.games?'<p class="rating-chart-note">Каждая точка показывает рейтинг после подтверждённого матча.</p>':'<p class="rating-chart-note">После первого подтверждённого матча здесь появится изменение рейтинга.</p>'}
+    </section>
     <div class="data-table-wrap history-table-wrap">
       <table class="data-table history-table">
         <thead><tr><th>Дата</th><th>Результат</th><th>Соперник</th><th>Счёт</th><th>Тип</th><th>Elo</th></tr></thead>
         <tbody>${rows}</tbody>
       </table>
     </div>`;
+}
+
+function drawRatingChart(){
+  const canvas=document.querySelector('#rating-history-chart'),me=currentUser();
+  if(!canvas||!me?.isPlayer||!canvas.isConnected) return;
+  const wrapper=canvas.parentElement,width=Math.floor(wrapper.clientWidth),height=window.innerWidth<=560?210:260;
+  if(width<80) return;
+  const stats=ratingCache[me.id]||{history:[]};
+  const matchById=new Map(db.matches.map(match=>[match.id,match]));
+  const played=(stats.history||[]).map(item=>({...item,createdAt:matchById.get(item.matchId)?.createdAt||null}));
+  const firstDate=played[0]?.createdAt||Date.now(),points=[{rating:ELO_START,createdAt:firstDate},...played];
+  const dpr=Math.max(1,window.devicePixelRatio||1); canvas.width=Math.round(width*dpr);canvas.height=Math.round(height*dpr);canvas.style.height=`${height}px`;
+  const context=canvas.getContext('2d');context.setTransform(dpr,0,0,dpr,0,0);context.clearRect(0,0,width,height);
+  const padding={top:20,right:22,bottom:35,left:48},chartWidth=width-padding.left-padding.right,chartHeight=height-padding.top-padding.bottom;
+  const values=points.map(point=>point.rating),rawMin=Math.min(...values),rawMax=Math.max(...values),range=Math.max(40,rawMax-rawMin);
+  const min=Math.floor((rawMin-range*.18)/10)*10,max=Math.ceil((rawMax+range*.18)/10)*10;
+  const x=index=>padding.left+(points.length===1?chartWidth/2:index/(points.length-1)*chartWidth);
+  const y=rating=>padding.top+(max-rating)/(max-min)*chartHeight;
+  context.font='11px Segoe UI, Arial, sans-serif';context.textBaseline='middle';context.strokeStyle='#dce1dc';context.fillStyle='#68736d';context.lineWidth=1;
+  for(let line=0;line<=4;line++){
+    const py=padding.top+chartHeight*line/4,rating=Math.round(max-(max-min)*line/4);
+    context.beginPath();context.moveTo(padding.left,py);context.lineTo(width-padding.right,py);context.stroke();
+    context.textAlign='right';context.fillText(String(rating),padding.left-9,py);
+  }
+  const gradient=context.createLinearGradient(0,padding.top,0,height-padding.bottom);gradient.addColorStop(0,'rgba(39,103,73,.24)');gradient.addColorStop(1,'rgba(39,103,73,0)');
+  context.beginPath();points.forEach((point,index)=>index?context.lineTo(x(index),y(point.rating)):context.moveTo(x(index),y(point.rating)));context.lineTo(x(points.length-1),height-padding.bottom);context.lineTo(x(0),height-padding.bottom);context.closePath();context.fillStyle=gradient;context.fill();
+  context.beginPath();points.forEach((point,index)=>index?context.lineTo(x(index),y(point.rating)):context.moveTo(x(index),y(point.rating)));context.strokeStyle='#276749';context.lineWidth=3;context.lineJoin='round';context.lineCap='round';context.stroke();
+  if(points.length<=36){ context.fillStyle='#fff';context.strokeStyle='#276749';context.lineWidth=2;points.forEach((point,index)=>{context.beginPath();context.arc(x(index),y(point.rating),3.5,0,Math.PI*2);context.fill();context.stroke();}); }
+  context.fillStyle='#68736d';context.font='10px Segoe UI, Arial, sans-serif';context.textBaseline='alphabetic';context.textAlign='left';context.fillText('Старт',padding.left,height-10);
+  if(played.length){ context.textAlign='right';context.fillText(formatDate(played.at(-1).createdAt),width-padding.right,height-10); }
+  const last=points.at(-1);context.fillStyle='#276749';context.font='700 11px Segoe UI, Arial, sans-serif';context.textAlign='right';context.textBaseline='bottom';context.fillText(`${last.rating} Elo`,Math.min(width-padding.right,x(points.length-1)),Math.max(14,y(last.rating)-7));
 }
 
 function tournamentStatus(tournament){
@@ -289,10 +337,17 @@ function renderNotifications(){
   if(!me||me.status!=='active'){ container.innerHTML=''; return; }
   const incoming=db.requests.filter(r=>r.status==='pending'&&r.opponent===me.id&&r.notified);
   const outgoing=db.requests.filter(r=>r.status==='pending'&&r.requester===me.id);
-  if(!incoming.length&&!outgoing.length){ container.innerHTML=''; return; }
+  const incomingChallenges=(db.challenges||[]).filter(c=>c.status==='pending'&&c.opponent===me.id);
+  const outgoingChallenges=(db.challenges||[]).filter(c=>c.status==='pending'&&c.challenger===me.id);
+  const acceptedChallenges=(db.challenges||[]).filter(c=>c.status==='accepted'&&(c.challenger===me.id||c.opponent===me.id)&&c.scheduledAt>Date.now()-12*60*60*1000).slice(0,3);
+  if(!incoming.length&&!outgoing.length&&!incomingChallenges.length&&!outgoingChallenges.length&&!acceptedChallenges.length){ container.innerHTML=''; return; }
   container.innerHTML=`<section class="notification-section"><h2>Заявки на результаты</h2>
     ${incoming.map(r=>{const sender=userById(r.requester);return `<div class="notification-card"><div><strong>${publicName(sender)} предлагает результат ${r.scoreRequester}:${r.scoreOpponent}</strong><p>${formatDate(r.createdAt)} · требуется ваше подтверждение</p></div><div class="notification-actions"><button class="button small danger" data-reject-request="${r.id}">Отклонить</button><button class="button small primary" data-confirm-request="${r.id}">Проверить</button></div></div>`}).join('')}
     ${outgoing.map(r=>{const opponent=userById(r.opponent);return `<div class="notification-card pending-card"><div><strong>Заявка для ${publicName(opponent)}: ${r.scoreRequester}:${r.scoreOpponent}</strong><p>${r.notified?'Уведомление отправлено, ожидается ответ':'Ожидается подтверждение по QR-коду'}</p></div><div class="notification-actions"><button class="button small secondary" data-show-qr="${r.id}">Показать QR</button></div></div>`}).join('')}
+  </section><section class="notification-section challenge-notifications"><h2>Вызовы на матч</h2>
+    ${incomingChallenges.map(c=>{const sender=userById(c.challenger);return `<div class="notification-card challenge-card"><div><strong>${publicName(sender)} предлагает сыграть</strong><p>${formatDateTime(c.scheduledAt)}${c.message?` · ${escapeHtml(c.message)}`:''}</p></div><div class="notification-actions"><button class="button small danger" data-challenge-action="reject" data-challenge-id="${c.id}">Отклонить</button><button class="button small primary" data-challenge-action="accept" data-challenge-id="${c.id}">Принять</button></div></div>`}).join('')}
+    ${outgoingChallenges.map(c=>`<div class="notification-card pending-card"><div><strong>Вызов для ${publicName(userById(c.opponent))}</strong><p>${formatDateTime(c.scheduledAt)} · ожидается ответ</p></div><div class="notification-actions"><button class="button small secondary" data-challenge-action="cancel" data-challenge-id="${c.id}">Отменить</button></div></div>`).join('')}
+    ${acceptedChallenges.map(c=>{const other=userById(c.challenger===me.id?c.opponent:c.challenger);return `<div class="notification-card accepted-challenge"><div><strong>Матч с ${publicName(other)} согласован</strong><p>${formatDateTime(c.scheduledAt)}${c.message?` · ${escapeHtml(c.message)}`:''}</p></div><div class="notification-actions"><button class="button small primary" data-result-opponent="${other.id}">Внести результат</button></div></div>`}).join('')}
   </section>`;
 }
 
@@ -304,6 +359,7 @@ function renderAdmin(){
   document.querySelector('#disputes').innerHTML=disputes.map(m=>{const a=userById(m.playerOne),b=userById(m.playerTwo),reporter=userById(m.dispute.userId);return `<div class="request-row"><div><div class="request-name">${publicName(a)} ${m.scoreOne}:${m.scoreTwo} ${publicName(b)}</div><div class="request-meta">${publicName(reporter)}: ${escapeHtml(m.dispute.reason)}</div></div><div class="row-actions"><button class="button small secondary" data-resolve="${m.id}">Оставить</button><button class="button small danger" data-cancel-match="${m.id}">Отменить матч</button></div></div>`}).join('')||'<div class="empty">Жалоб нет</div>';
   document.querySelector('#users-body').innerHTML=db.users.map(u=>`<tr><td>${escapeHtml(u.firstName)} ${escapeHtml(u.lastName)}${u.className?` · ${escapeHtml(u.className)}`:''}</td><td>${u.login?`@${escapeHtml(u.login)}`:'ЛК Силаэдра'}</td><td><span class="state ${u.status}">${statusLabel(u.status)}</span></td><td>${u.role==='admin'?'Администратор':u.role==='teacher'?'Учитель':'Ученик'}</td><td>${u.role!=='admin'&&u.status!=='pending'?`<button class="button small secondary" data-toggle-user="${u.id}">${u.status==='active'?'Сделать неактивным':'Активировать'}</button>`:''}</td></tr>`).join('');
   document.querySelector('#admin-tournaments-list').innerHTML=(db.tournaments||[]).map(t=>{const [label,state]=tournamentStatus(t);return `<div class="admin-tournament-row"><div><div class="request-name">${escapeHtml(t.name)}</div><div class="request-meta">${label} · ${t.participants.length}/${t.maxPlayers} участников · ${formatDateTime(t.startAt)}</div></div><div class="row-actions"><button class="button small secondary" data-open-tournament="${t.id}" data-go-tournaments>Открыть</button>${t.status==='registration'?`<button class="button small primary" data-start-tournament="${t.id}">Сформировать сетку</button><button class="button small danger" data-cancel-tournament="${t.id}">Отменить</button>`:''}</div></div>`}).join('')||'<div class="empty">Турниров пока нет</div>';
+  document.querySelector('#security-alerts').innerHTML=(db.securityAlerts||[]).map(alert=>`<div class="security-alert ${alert.severity}"><span class="security-mark">!</span><div><strong>${escapeHtml(alert.title)}</strong><p>${alert.userIds.map(id=>publicName(userById(id))).join(' и ')} · ${escapeHtml(alert.details)}</p></div></div>`).join('')||'<div class="empty">Подозрительной активности не обнаружено</div>';
 }
 function statusLabel(status){ return ({active:'Активен',pending:'Ожидает',inactive:'Неактивен',rejected:'Отклонён'})[status]||status; }
 
@@ -315,6 +371,7 @@ function showView(name,updateHash=true){
   if(!document.querySelector(`[data-view="${name}"]`)) name='home';
   document.querySelectorAll('[data-view]').forEach(view=>view.hidden=view.dataset.view!==name);
   document.querySelectorAll('[data-route]').forEach(link=>link.classList.toggle('active',link.dataset.route===name));
+  if(name==='history') requestAnimationFrame(drawRatingChart);
   if(name==='tournaments') requestAnimationFrame(()=>{const tournament=(db.tournaments||[]).find(item=>item.id===selectedTournamentId);if(tournament)drawTournamentConnections(tournament)});
   if(updateHash) history.pushState(null,'',`#${name}`); window.scrollTo({top:0,behavior:'smooth'});
 }
@@ -326,7 +383,7 @@ function openAuth(){
   emailField.hidden=!db.localLoginEnabled; emailField.querySelector('input').disabled=!db.localLoginEnabled;
   document.querySelector('#auth-dialog').showModal();
 }
-function openMatchForm(tournamentMatch=null){
+function openMatchForm(tournamentMatch=null, presetOpponentId=null){
   const me=currentUser();
   if(!me){ openAuth(); return; }
   if(me.status!=='active'){ toast('Сначала дождитесь подтверждения администратора'); return; }
@@ -346,6 +403,9 @@ function openMatchForm(tournamentMatch=null){
     const opponent=players.find(player=>player.id===opponentId);
     if(!opponent){ toast('Соперник недоступен'); return; }
     opponentOptions=[opponent]; selectOpponent(opponent.id);
+  }else if(presetOpponentId){
+    const opponent=players.find(player=>player.id===presetOpponentId);
+    if(opponent) selectOpponent(opponent.id);
   }
   form.querySelector('[data-form-message]').textContent=''; document.querySelector('#match-dialog').showModal();
 }
@@ -370,8 +430,8 @@ function showQr(request){
   const opponent=userById(request.opponent), requester=userById(request.requester);
   document.querySelector('#request-qr').src=`/api/requests/${encodeURIComponent(request.id)}/qr?v=${Date.now()}`;
   document.querySelector('#request-summary').textContent=`${displayName(requester)} ${request.scoreRequester}:${request.scoreOpponent} ${displayName(opponent)}`;
-  const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=request.notified; button.textContent=request.notified?'Уведомление отправлено':'Отправить на сайте, email и в Telegram';
-  document.querySelector('#notification-status').textContent=request.notified?'Соперник увидит заявку при входе в аккаунт.':'Уведомление появится на сайте, придёт на почту и в подключённый Telegram.';
+  const button=document.querySelector('#send-notification'); button.dataset.requestId=request.id; button.disabled=false; button.textContent=request.notified?'Повторить отправку через ЛК':'Отправить через ЛК Силаэдра';
+  document.querySelector('#notification-status').textContent=request.notified?'Соперник видит заявку на сайте. Отправку через ЛК можно безопасно повторить.':'ЛК отправит уведомление на email и в подключённый Telegram.';
   document.querySelector('#qr-dialog').showModal();
 }
 
@@ -401,14 +461,36 @@ async function rejectRequest(request){
   try { await mutate(`/api/requests/${request.id}/reject`,{}); if(document.querySelector('#confirm-dialog').open) document.querySelector('#confirm-dialog').close(); const target=request.tournamentMatchId?'tournaments':'home';history.replaceState(null,'',`#${target}`);showView(target,false);toast('Заявка отклонена'); }
   catch(error){ toast(error.message); }
 }
+function profileOutcome(match,id){
+  const own=match.playerOne===id?match.scoreOne:match.scoreTwo, other=match.playerOne===id?match.scoreTwo:match.scoreOne;
+  return own>other?'win':'loss';
+}
+function drawProfileRatingChart(id){
+  const canvas=document.querySelector('#profile-rating-chart'); if(!canvas)return;
+  const history=ratingCache[id]?.history||[],points=[ELO_START,...history.map(item=>item.rating)],rect=canvas.getBoundingClientRect(),ratio=window.devicePixelRatio||1,width=Math.max(280,rect.width),height=180;
+  canvas.width=width*ratio;canvas.height=height*ratio;const ctx=canvas.getContext('2d');ctx.scale(ratio,ratio);ctx.clearRect(0,0,width,height);
+  const min=Math.min(...points)-18,max=Math.max(...points)+18,pad=18;ctx.strokeStyle='#dce4df';ctx.beginPath();ctx.moveTo(pad,height-pad);ctx.lineTo(width-pad,height-pad);ctx.stroke();
+  if(points.length===1){ctx.fillStyle='#1e6b45';ctx.beginPath();ctx.arc(width/2,height/2,4,0,Math.PI*2);ctx.fill();return;}
+  ctx.strokeStyle='#1e6b45';ctx.lineWidth=3;ctx.lineJoin='round';ctx.beginPath();points.forEach((value,index)=>{const x=pad+index*(width-pad*2)/(points.length-1),y=pad+(max-value)*(height-pad*2)/(max-min||1);index?ctx.lineTo(x,y):ctx.moveTo(x,y)});ctx.stroke();
+}
+function openChallenge(id){
+  const me=currentUser(),opponent=userById(id);if(!me){openAuth();return}if(!opponent||opponent.id===me.id)return;
+  const form=document.querySelector('#challenge-form');form.reset();form.opponent.value=id;form.scheduledAt.value=localDateTimeValue(Date.now()+24*60*60*1000);form.querySelector('[data-form-message]').textContent='';
+  document.querySelector('#challenge-opponent-name').textContent=`Соперник: ${displayName(opponent)}`;document.querySelector('#challenge-dialog').showModal();
+}
 function openProfile(id){
   const user=userById(id), stats=ratingCache[id]; if(!user||!stats) return;
   const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=db.matches.filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
   const rate=stats.games?Math.round(stats.wins/stats.games*100):0;
   const email=user.email&&(currentUser()?.id===id||currentUser()?.role==='admin')?`<p>Почта ЛК: ${escapeHtml(user.email)}</p>`:'';
-  const telegram=currentUser()?.id===id?`<form id="telegram-profile-form" class="telegram-profile-form"><div><h3>Уведомления в Telegram</h3><p>${user.telegramConnected?`Подключено к @${escapeHtml(user.telegramUsername)}`:user.telegramUsername?`Ник @${escapeHtml(user.telegramUsername)} сохранён, осталось запустить бота.`:'Введите свой ник и один раз запустите школьного бота.'}</p></div><label>Ник Telegram<input name="username" value="${escapeHtml(user.telegramUsername||'')}" placeholder="@username" autocomplete="off" required></label><button class="button secondary" type="submit">${user.telegramConnected?'Переподключить':'Сохранить и подключить'}</button><p class="form-message" data-form-message></p></form>`:'';
-  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div>${telegram}<div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
-  document.querySelector('#profile-dialog').showModal();
+  const form=games.slice(0,5).map(match=>profileOutcome(match,id));
+  const changeIndex=form.findIndex(item=>item!==form[0]),streakLength=form.length?(changeIndex<0?form.length:changeIndex):0;
+  const streakWord=form[0]==='win'?(streakLength===1?'победа':streakLength<5?'победы':'побед'):(streakLength===1?'поражение':streakLength<5?'поражения':'поражений');
+  const streakText=streakLength?`${streakLength} ${streakWord} подряд`:'Матчей пока нет';
+  const me=currentUser(),headToHead=me&&me.id!==id?games.filter(match=>match.playerOne===me.id||match.playerTwo===me.id):[],h2hWins=headToHead.filter(match=>profileOutcome(match,id)==='win').length;
+  const h2h=me&&me.id!==id?`<div class="head-to-head"><div><span>Личные встречи с вами</span><strong>${h2hWins}:${headToHead.length-h2hWins}</strong><small>в пользу ${escapeHtml(user.firstName)}</small></div><button class="button primary" data-challenge-player="${id}">Вызвать на матч</button></div>`:'';
+  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${stats.wins}/${stats.losses}</strong><span>Победы / поражения</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-form-row"><div><span>Последняя форма</span><div class="form-dots">${form.map(item=>`<i class="${item}">${item==='win'?'В':'П'}</i>`).join('')||'—'}</div></div><strong>${streakText}</strong></div>${h2h}<div class="profile-chart"><h3>Изменение рейтинга</h3><canvas id="profile-rating-chart" aria-label="График рейтинга игрока"></canvas></div><div class="profile-notification-note">Уведомления по email и в Telegram настраиваются в ЛК Силаэдра.</div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne), own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${own}:${other}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
+  document.querySelector('#profile-dialog').showModal();requestAnimationFrame(()=>drawProfileRatingChart(id));
 }
 
 function toast(message){ const el=document.querySelector('#toast'); el.textContent=message; el.classList.add('show'); clearTimeout(toast.timer); toast.timer=setTimeout(()=>el.classList.remove('show'),2500); }
@@ -427,6 +509,9 @@ document.addEventListener('click',async event=>{
   const cancelTournament=event.target.closest('[data-cancel-tournament]'); if(cancelTournament&&confirm('Отменить этот турнир?')){ try{await mutate(`/api/admin/tournaments/${cancelTournament.dataset.cancelTournament}/cancel`,{});toast('Турнир отменён')}catch(error){toast(error.message)} }
   const tournamentResult=event.target.closest('[data-tournament-result]'); if(tournamentResult) openMatchForm(tournamentMatchById(tournamentResult.dataset.tournamentResult));
   const profile=event.target.closest('[data-profile]'); if(profile) openProfile(profile.dataset.profile);
+  const challengePlayer=event.target.closest('[data-challenge-player]'); if(challengePlayer){document.querySelector('#profile-dialog').close();openChallenge(challengePlayer.dataset.challengePlayer);}
+  const challengeAction=event.target.closest('[data-challenge-action]'); if(challengeAction){try{await mutate(`/api/challenges/${challengeAction.dataset.challengeId}/${challengeAction.dataset.challengeAction}`,{});toast(challengeAction.dataset.challengeAction==='accept'?'Вызов принят':challengeAction.dataset.challengeAction==='reject'?'Вызов отклонён':'Вызов отменён')}catch(error){toast(error.message)}}
+  const resultOpponent=event.target.closest('[data-result-opponent]'); if(resultOpponent)openMatchForm(null,resultOpponent.dataset.resultOpponent);
   const close=event.target.closest('[data-close]'); if(close) close.closest('dialog').close();
   const oidcButton=event.target.closest('#oidc-login-button'); if(oidcButton&&!db.oidcEnabled){event.preventDefault();toast('OIDC-клиент ещё не настроен')}
   const approve=event.target.closest('[data-approve]'); if(approve){ try{await mutate(`/api/admin/users/${approve.dataset.approve}/approve`,{});toast('Регистрация подтверждена')}catch(error){toast(error.message)} }
@@ -448,11 +533,10 @@ document.querySelector('#send-notification').addEventListener('click',async even
   button.dataset.sending='true'; button.disabled=true; button.textContent='Отправляем…';
   try {
     const result=await mutate(`/api/requests/${request.id}/notify`,{}); button.textContent='Уведомление отправлено';
-    const emailMessages={sent:'Email отправлен.',no_email:'Почта не указана.',not_configured:'Email не настроен на сервере.',failed:'Email доставить не удалось.'};
-    const telegramMessages={sent:'Telegram отправлен.',no_username:'Ник Telegram не указан.',not_connected:'Telegram ещё не подключён через бота.',not_configured:'Telegram-бот не настроен.',failed:'Сообщение в Telegram доставить не удалось.'};
-    const message=`Уведомление на сайте отправлено. ${emailMessages[result.emailStatus]||''} ${telegramMessages[result.telegramStatus]||''}`.trim(); document.querySelector('#notification-status').textContent=message; toast(message);
+    const statusMessages={queued:'Уведомление поставлено в очередь ЛК Силаэдра для email и Telegram.',no_oidc:'У игрока пока нет привязанного аккаунта ЛК, заявка останется на сайте.',not_configured:'API уведомлений ЛК не настроен.',failed:'ЛК временно не принял уведомление; заявка останется на сайте.'};
+    const message=statusMessages[result.notificationStatus]||'Уведомление на сайте отправлено.'; document.querySelector('#notification-status').textContent=message; toast(message);
   }
-  catch(error){ button.disabled=false; button.textContent='Отправить на сайте, email и в Telegram'; toast(error.message); }
+  catch(error){ button.disabled=false; button.textContent='Отправить через ЛК Силаэдра'; toast(error.message); }
   finally { delete button.dataset.sending; }
 });
 document.querySelector('#accept-request').addEventListener('click',event=>acceptRequest(requestById(event.currentTarget.dataset.requestId)));
@@ -462,21 +546,6 @@ document.querySelector('#login-form').addEventListener('submit',async event=>{
   event.preventDefault(); const form=event.currentTarget,message=form.querySelector('[data-form-message]');
   try { await api('/api/login',{method:'POST',body:{login:form.login.value.trim(),password:form.password.value,email:db.localLoginEnabled?form.email.value.trim():''}}); await refreshState(); form.reset(); message.textContent=''; document.querySelector('#auth-dialog').close(); render(); toast('Вход выполнен'); }
   catch(error){ message.textContent=error.message; }
-});
-
-document.addEventListener('submit',async event=>{
-  if(event.target.id!=='telegram-profile-form') return;
-  event.preventDefault(); const form=event.target,message=form.querySelector('[data-form-message]'),username=form.username.value.trim();
-  const botWindow=window.open('about:blank','_blank');
-  try{
-    const result=await api('/api/profile/telegram',{method:'POST',body:{username}}); await refreshState(); render();
-    if(result.link){
-      if(botWindow) botWindow.location=result.link;
-      else message.innerHTML=`Браузер заблокировал новое окно. <a href="${escapeHtml(result.link)}" target="_blank" rel="noopener">Открыть бота</a>`;
-      toast('Откройте бота и нажмите «Запустить»');
-    }
-    else { if(botWindow)botWindow.close(); message.textContent='Telegram-бот ещё не настроен на сервере.'; toast(message.textContent); }
-  }catch(error){ if(botWindow)botWindow.close(); message.textContent=error.message; }
 });
 
 document.querySelector('#match-form').addEventListener('submit',async event=>{
@@ -493,6 +562,12 @@ document.querySelector('#tournament-form').addEventListener('submit',async event
   event.preventDefault();const form=event.currentTarget,message=form.querySelector('[data-form-message]');
   const registrationDeadline=new Date(form.registrationDeadline.value).getTime(),startAt=new Date(form.startAt.value).getTime();
   try{const created=await api('/api/admin/tournaments',{method:'POST',body:{name:form.name.value.trim(),description:form.description.value.trim(),registrationDeadline,startAt,maxPlayers:Number(form.maxPlayers.value)}});await refreshState();selectedTournamentId=created.id;form.reset();document.querySelector('#tournament-dialog').close();render();showView('tournaments');toast('Турнир создан, регистрация открыта')}
+  catch(error){message.textContent=error.message}
+});
+
+document.querySelector('#challenge-form').addEventListener('submit',async event=>{
+  event.preventDefault();const form=event.currentTarget,message=form.querySelector('[data-form-message]'),scheduledAt=new Date(form.scheduledAt.value).getTime();
+  try{await mutate('/api/challenges',{opponent:form.opponent.value,scheduledAt,message:form.message.value.trim()});document.querySelector('#challenge-dialog').close();toast('Вызов отправлен сопернику')}
   catch(error){message.textContent=error.message}
 });
 
@@ -521,6 +596,6 @@ document.querySelector('#dispute-form').addEventListener('submit',async event=>{
 
 window.addEventListener('hashchange',()=>showView((location.hash||'#home').slice(1),false));
 let bracketResizeTimer;
-window.addEventListener('resize',()=>{ clearTimeout(bracketResizeTimer);bracketResizeTimer=setTimeout(()=>{const tournament=(db.tournaments||[]).find(item=>item.id===selectedTournamentId);if(tournament)drawTournamentConnections(tournament)},120); });
+window.addEventListener('resize',()=>{ clearTimeout(bracketResizeTimer);bracketResizeTimer=setTimeout(()=>{const tournament=(db.tournaments||[]).find(item=>item.id===selectedTournamentId);if(tournament)drawTournamentConnections(tournament);if(!document.querySelector('[data-view="history"]').hidden)drawRatingChart()},120); });
 refreshState().then(()=>{render();if(db.authMessage)toast(db.authMessage)}).catch(error=>toast(`Не удалось подключиться к серверу: ${error.message}`));
 setInterval(async()=>{ try{await refreshState();render()}catch{} },15000);

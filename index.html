@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f8f6">
   <title>Школьный рейтинг настольного тенниса</title>
   <link rel="icon" href="/static/school-logo.jfif">
-  <link rel="stylesheet" href="/styles.css?v=20260811-9">
+  <link rel="stylesheet" href="/styles.css?v=20260812-12">
 </head>
 <body>
   <header class="site-header">
@@ -64,6 +64,7 @@
         <section class="panel"><div class="panel-heading"><h2>Заявки на регистрацию</h2></div><div id="pending-users"></div></section>
         <section class="panel"><div class="panel-heading"><h2>Жалобы на результаты</h2></div><div id="disputes"></div></section>
       </div>
+      <section class="panel admin-security"><div class="panel-heading"><div><p class="kicker">ПРОВЕРКА РЕЗУЛЬТАТОВ</p><h2>Сигналы античита</h2></div></div><p class="panel-note">Система только отмечает необычную активность. Решение всегда принимает администратор.</p><div id="security-alerts"></div></section>
       <section class="panel admin-users"><div class="panel-heading"><h2>Все пользователи</h2></div><div class="data-table-wrap"><table class="data-table"><thead><tr><th>Пользователь</th><th>Логин</th><th>Статус</th><th>Роль</th><th></th></tr></thead><tbody id="users-body"></tbody></table></div></section>
       <section class="panel admin-tournaments">
         <div class="panel-heading"><div><p class="kicker">ТУРНИРНАЯ СЕТКА</p><h2>Управление турнирами</h2></div><button class="button primary" data-action="create-tournament">Создать турнир</button></div>
@@ -91,7 +92,7 @@
     <form id="login-form">
       <label>Логин<input name="login" autocomplete="username" required></label>
       <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
-      <label id="local-email-field" hidden>Почта для уведомлений<input name="email" type="email" autocomplete="email" placeholder="example@school.ru"><small>Только для локального тестового аккаунта</small></label>
+      <label id="local-email-field" hidden>Почта тестового профиля<input name="email" type="email" autocomplete="email" placeholder="example@school.ru"><small>API ЛК использует OIDC-профиль, а не этот адрес</small></label>
       <p class="form-message" data-form-message></p>
       <button class="button primary wide">Войти</button>
     </form>
@@ -140,8 +141,8 @@
     <p class="modal-description">Соперник должен отсканировать код и войти в свой аккаунт.</p>
     <div class="qr-box"><img id="request-qr" width="220" height="220" alt="QR-код для подтверждения матча"></div>
     <div class="request-summary" id="request-summary"></div>
-    <button class="button primary wide" id="send-notification">Отправить на сайте, email и в Telegram</button>
-    <p class="qr-note" id="notification-status">Можно использовать любой из двух способов подтверждения.</p>
+    <button class="button primary wide" id="send-notification">Отправить через ЛК Силаэдра</button>
+    <p class="qr-note" id="notification-status">ЛК доставит уведомление по email и в подключённый Telegram.</p>
   </dialog>
 
   <dialog id="confirm-dialog" class="modal small-modal">
@@ -157,6 +158,19 @@
     <div id="profile-content"></div>
   </dialog>
 
+  <dialog id="challenge-dialog" class="modal small-modal">
+    <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
+    <p class="kicker">ВЫЗОВ НА МАТЧ</p><h2>Предложить сыграть</h2>
+    <p class="modal-description" id="challenge-opponent-name"></p>
+    <form id="challenge-form">
+      <input name="opponent" type="hidden">
+      <label>Дата и время<input name="scheduledAt" type="datetime-local" required></label>
+      <label>Комментарий<textarea name="message" rows="3" maxlength="250" placeholder="Например: после уроков, у стола в холле"></textarea></label>
+      <p class="form-message" data-form-message></p>
+      <button class="button primary wide">Отправить вызов</button>
+    </form>
+  </dialog>
+
   <dialog id="dispute-dialog" class="modal small-modal">
     <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
     <h2>Сообщить об ошибке</h2><p class="modal-description">Администратор проверит результат и при необходимости отменит матч.</p>
@@ -164,6 +178,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20260811-13"></script>
+  <script src="/app.js?v=20260812-17"></script>
 </body>
 </html>

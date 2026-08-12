@@ -55,40 +55,6 @@ services:
     cap_drop:
       - ALL
 
-  telegram-poller:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    container_name: silaeder-telegram-poller
-    restart: unless-stopped
-    init: true
-    env_file:
-      - .env
-    environment:
-      TENNIS_DB_PATH: /data/tennis.db
-      TZ: Europe/Moscow
-    volumes:
-      - tennis-data-v2:/data
-    depends_on:
-      tennis:
-        condition: service_healthy
-    command:
-      - sh
-      - -c
-      - |
-        if [ -z "$${TELEGRAM_BOT_TOKEN}" ] || [ -z "$${TELEGRAM_BOT_USERNAME}" ]; then
-          echo "Telegram polling отключён: задайте TELEGRAM_BOT_TOKEN и TELEGRAM_BOT_USERNAME"
-          exec sleep infinity
-        fi
-        exec flask --app app telegram-polling
-    read_only: true
-    tmpfs:
-      - /tmp:size=16m,noexec,nosuid,nodev
-    security_opt:
-      - no-new-privileges:true
-    cap_drop:
-      - ALL
-
 volumes:
   tennis-data:
   tennis-data-v2:

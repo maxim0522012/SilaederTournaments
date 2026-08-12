@@ -5,7 +5,6 @@ from unittest.mock import Mock, patch
 
 from werkzeug.security import generate_password_hash
 from flask_migrate import upgrade
-from requests import ConnectionError as RequestsConnectionError
 
 TEMP_DIR = tempfile.TemporaryDirectory(ignore_cleanup_errors=True)
 os.environ["TENNIS_DB_PATH"] = os.path.join(TEMP_DIR.name, "test.db")
@@ -15,8 +14,8 @@ os.environ["CRM_OIDC_ENABLED"] = "false"
 os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["ALLOW_LOCAL_USER_LOGIN"] = "true"
 
-from app import (QR_BASE_URL, ROOT, app, clear_login_failures, db, process_telegram_update,
-                 seed_database, telegram_api_call, update_user_from_oidc)  # noqa: E402
+from app import (QR_BASE_URL, ROOT, app, clear_login_failures, db,
+                 seed_database, send_external_notification, update_user_from_oidc)  # noqa: E402
 
 with app.app_context():
     upgrade(directory=str(ROOT / "migrations"))
@@ -26,13 +25,15 @@ with app.app_context():
 class ServerFlowTest(unittest.TestCase):
     def setUp(self):
         with db() as connection:
+            connection.execute("DELETE FROM oidc_identities")
+            connection.execute("DELETE FROM account_link_tokens")
+            connection.execute("DELETE FROM match_challenges")
             connection.execute("DELETE FROM requests")
             connection.execute("DELETE FROM tournament_matches")
             connection.execute("DELETE FROM tournament_participants")
             connection.execute("DELETE FROM tournaments")
             connection.execute("DELETE FROM matches")
             connection.execute("DELETE FROM users WHERE role!='admin'")
-            connection.execute("UPDATE telegram_polling_state SET update_offset=0 WHERE id=1")
             created = 1_700_000_000_000
             users = [
                 ("u1", "Максим", "Орлов", "10Б", "maxim", "maxim-password-123"),
@@ -83,104 +84,59 @@ class ServerFlowTest(unittest.TestCase):
         self.assertTrue(state["localLoginEnabled"])
         self.assertEqual(current["email"], "maxim.local@example.org")
 
-    def test_telegram_profile_links_chat_through_polling_update(self):
-        client = app.test_client()
-        self.assertEqual(self.login(client, "maxim", "maxim-password-123").status_code, 200)
-
-        with patch("app.TELEGRAM_ENABLED", True), \
-                patch("app.TELEGRAM_BOT_USERNAME", "school_tennis_test_bot"):
-            saved = self.post(client, "/api/profile/telegram", {"username": "@maxim_test"})
-            self.assertEqual(saved.status_code, 200)
-            self.assertTrue(saved.get_json()["link"].startswith("https://t.me/school_tennis_test_bot?start="))
-
-            with db() as connection:
-                token = connection.execute(
-                    "SELECT telegram_link_token FROM users WHERE id='u1'"
-                ).fetchone()["telegram_link_token"]
-
-            with patch("app.send_telegram_message") as send_telegram:
-                handled = process_telegram_update({
-                    "update_id": 42,
-                    "message": {"text": f"/start {token}", "chat": {"id": 987654},
-                                "from": {"username": "maxim_test"}},
-                })
-                self.assertTrue(handled)
-                send_telegram.assert_called_once()
-                self.assertEqual(send_telegram.call_args.args[0], "987654")
-
-        with db() as connection:
-            telegram = connection.execute(
-                "SELECT telegram_username,telegram_chat_id,telegram_link_token FROM users WHERE id='u1'"
-            ).fetchone()
-            self.assertEqual(telegram["telegram_username"], "maxim_test")
-            self.assertEqual(telegram["telegram_chat_id"], "987654")
-            self.assertIsNone(telegram["telegram_link_token"])
-            self.assertIsNotNone(connection.execute(
-                "SELECT update_offset FROM telegram_polling_state WHERE id=1"
-            ).fetchone())
-        self.assertEqual(client.get("/api/telegram/webhook").status_code, 404)
-
-    def test_telegram_polling_command_persists_update_offset(self):
-        client = app.test_client()
-        self.assertEqual(self.login(client, "maxim", "maxim-password-123").status_code, 200)
-
-        with patch("app.TELEGRAM_ENABLED", True), \
-                patch("app.TELEGRAM_BOT_USERNAME", "school_tennis_test_bot"):
-            saved = self.post(client, "/api/profile/telegram", {"username": "maxim_test"})
-            self.assertEqual(saved.status_code, 200)
-            with db() as connection:
-                token = connection.execute(
-                    "SELECT telegram_link_token FROM users WHERE id='u1'"
-                ).fetchone()["telegram_link_token"]
-
-            get_updates_calls = 0
-
-            def fake_telegram_api(method, payload=None, timeout=15):
-                nonlocal get_updates_calls
-                if method == "getUpdates":
-                    get_updates_calls += 1
-                    if get_updates_calls > 1:
-                        raise KeyboardInterrupt()
-                    return [{
-                        "update_id": 77,
-                        "message": {"text": f"/start {token}", "chat": {"id": 987654},
-                                    "from": {"username": "maxim_test"}},
-                    }]
-                return True
-
-            with patch("app.telegram_api_call", side_effect=fake_telegram_api):
-                result = app.test_cli_runner().invoke(args=["telegram-polling"])
-                self.assertEqual(result.exit_code, 0, result.output)
-
-        with db() as connection:
-            offset = connection.execute(
-                "SELECT update_offset FROM telegram_polling_state WHERE id=1"
-            ).fetchone()["update_offset"]
-            chat_id = connection.execute(
-                "SELECT telegram_chat_id FROM users WHERE id='u1'"
-            ).fetchone()["telegram_chat_id"]
-            self.assertEqual(offset, 78)
-            self.assertEqual(chat_id, "987654")
-
-    def test_telegram_api_supports_socks5_proxy_without_leaking_credentials(self):
-        proxy_url = "socks5h://proxy-user:proxy-password@127.0.0.1:1080"
-        response = Mock()
-        response.raise_for_status.return_value = None
-        response.json.return_value = {"ok": True, "result": {"id": 1}}
-
-        with patch("app.TELEGRAM_PROXY_URL", proxy_url), \
+    def test_external_notification_uses_basic_auth_idempotency_and_retries(self):
+        response = Mock(status_code=202, headers={})
+        response.json.return_value = {"id": 7, "status": "queued", "idempotent_replay": False}
+        with patch("app.EXTERNAL_NOTIFICATIONS_ENABLED", True), \
+                patch("app.CRM_NOTIFICATION_CLIENT_ID", "tennis"), \
+                patch("app.CRM_NOTIFICATION_CLIENT_SECRET", "secret"), \
                 patch("app.http_requests.post", return_value=response) as post:
-            self.assertEqual(telegram_api_call("getMe"), {"id": 1})
-            self.assertEqual(post.call_args.kwargs["proxies"], {
-                "http": proxy_url,
-                "https": proxy_url,
-            })
+            result = send_external_notification("790be3dd-4b7a-4ab4-94ce-82d44bcfd06f", "tennis.match.r-1", "Матч", "Проверьте результат")
+        self.assertEqual(result["status"], "queued")
+        self.assertEqual(post.call_args.kwargs["auth"], ("tennis", "secret"))
+        self.assertEqual(post.call_args.kwargs["headers"]["Idempotency-Key"], "tennis.match.r-1")
 
-        with patch("app.TELEGRAM_PROXY_URL", proxy_url), \
-                patch("app.http_requests.post", side_effect=RequestsConnectionError(proxy_url)):
-            with self.assertRaises(RuntimeError) as raised:
-                telegram_api_call("getMe")
-            self.assertNotIn("proxy-password", str(raised.exception))
+        unavailable = Mock(status_code=503, headers={})
+        unavailable.json.return_value = {"message": "queue unavailable"}
+        replay = Mock(status_code=200, headers={})
+        replay.json.return_value = {"id": 7, "status": "queued", "idempotent_replay": True}
+        with patch("app.EXTERNAL_NOTIFICATIONS_ENABLED", True), \
+                patch("app.CRM_NOTIFICATION_CLIENT_ID", "tennis"), \
+                patch("app.CRM_NOTIFICATION_CLIENT_SECRET", "secret"), \
+                patch("app.time.sleep"), \
+                patch("app.http_requests.post", side_effect=[unavailable, replay]) as retry_post:
+            retried = send_external_notification("790be3dd-4b7a-4ab4-94ce-82d44bcfd06f", "tennis.match.r-1", "Матч", "Проверьте результат")
+        self.assertTrue(retried["idempotent_replay"])
+        self.assertEqual(retry_post.call_count, 2)
+        self.assertEqual(retry_post.call_args_list[0].kwargs["json"], retry_post.call_args_list[1].kwargs["json"])
+
+    def test_challenge_flow_and_admin_security_alerts(self):
+        challenger = app.test_client()
+        opponent = app.test_client()
+        admin = app.test_client()
+        self.assertEqual(self.login(challenger, "maxim", "maxim-password-123").status_code, 200)
+        self.assertEqual(self.login(opponent, "eva", "eva-password-123").status_code, 200)
+        scheduled_at = int(__import__("time").time() * 1000) + 24 * 60 * 60 * 1000
+        created = self.post(challenger, "/api/challenges", {
+            "opponent": "u8", "scheduledAt": scheduled_at, "message": "После уроков",
+        })
+        self.assertEqual(created.status_code, 200, created.get_json())
+        challenge_id = created.get_json()["id"]
+        incoming = opponent.get("/api/state").get_json()["challenges"]
+        self.assertEqual(incoming[0]["message"], "После уроков")
+        self.assertEqual(self.post(opponent, f"/api/challenges/{challenge_id}/accept").status_code, 200)
+        self.assertEqual(opponent.get("/api/state").get_json()["challenges"][0]["status"], "accepted")
+
+        for score in (4, 4, 4, 6):
+            request_created = self.post(challenger, "/api/requests", {
+                "opponent": "u8", "scoreRequester": 11, "scoreOpponent": score,
+            })
+            self.assertEqual(request_created.status_code, 200)
+            self.assertEqual(self.post(opponent, f"/api/requests/{request_created.get_json()['id']}/accept").status_code, 200)
+        self.assertEqual(self.login(admin, "admin", "test-admin-password-123").status_code, 200)
+        alerts = admin.get("/api/state").get_json()["securityAlerts"]
+        self.assertTrue(any(alert["kind"] == "frequent_pair" for alert in alerts))
+        self.assertTrue(any(alert["kind"] == "repeated_score" for alert in alerts))
 
     def test_match_request_notification_confirmation_and_local_qr(self):
         requester = app.test_client()
@@ -193,8 +149,8 @@ class ServerFlowTest(unittest.TestCase):
 
         with db() as connection:
             connection.execute(
-                "UPDATE users SET email='eva.lk@example.org',telegram_username='eva_test',telegram_chat_id='123456' "
-                "WHERE id='u8'"
+                "INSERT INTO oidc_identities(issuer,subject,user_id,created_at) VALUES(?,?,?,?)",
+                ("https://lk.silaeder.ru", "790be3dd-4b7a-4ab4-94ce-82d44bcfd06f", "u8", 1_700_000_000_000),
             )
 
         qr = requester.get(f"/api/requests/{request_id}/qr")
@@ -203,20 +159,15 @@ class ServerFlowTest(unittest.TestCase):
         self.assertNotIn(b"api.qrserver.com", qr.data)
         self.assertEqual(qr.headers["Content-Location"], f"{QR_BASE_URL}/confirm/{confirmation_token}")
 
-        with patch("app.mail_configured", return_value=True), \
-                patch("app.send_match_notification_email") as send_email, \
-                patch("app.TELEGRAM_ENABLED", True), \
-                patch("app.send_telegram_message") as send_telegram:
+        with patch("app.send_external_notification", return_value={"status": "queued", "idempotent_replay": False}) as send_notification:
             notified = self.post(requester, f"/api/requests/{request_id}/notify")
             self.assertEqual(notified.status_code, 200)
-            self.assertTrue(notified.get_json()["emailSent"])
-            self.assertTrue(notified.get_json()["telegramSent"])
-            send_email.assert_called_once_with(
-                "eva.lk@example.org", "Максим Орлов", "Ева Новикова", 11, 7, confirmation_token,
-            )
-            send_telegram.assert_called_once()
-            self.assertEqual(send_telegram.call_args.args[0], "123456")
-            self.assertIn(f"/confirm/{confirmation_token}", send_telegram.call_args.args[1])
+            self.assertTrue(notified.get_json()["queued"])
+            self.assertEqual(notified.get_json()["notificationStatus"], "queued")
+            send_notification.assert_called_once()
+            self.assertEqual(send_notification.call_args.args[0], "790be3dd-4b7a-4ab4-94ce-82d44bcfd06f")
+            self.assertEqual(send_notification.call_args.args[1], f"tennis.match-request.{request_id}")
+            self.assertIn(f"/confirm/{confirmation_token}", send_notification.call_args.args[4])
         self.assertEqual(opponent.get(f"/confirm/{confirmation_token}").status_code, 200)
         with opponent.session_transaction() as confirmation_session:
             self.assertEqual(confirmation_session["confirmation_token"], confirmation_token)
