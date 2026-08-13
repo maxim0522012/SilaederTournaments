@@ -6,6 +6,8 @@ let ratingCache = {};
 let opponentOptions = [];
 let selectedTournamentId = null;
 let activeSport = localStorage.getItem('school-sport')==='chess'?'chess':'tennis';
+const LICHESS_AUTO_SYNC_INTERVAL = 5 * 60 * 1000;
+let lichessAutoSyncRunning = false;
 const sportNames={tennis:'настольный теннис',chess:'шахматы'};
 function sportLabel(sport){return sport==='chess'?'Шахматы':'Настольный теннис'}
 function sportMatches(){return db.matches.filter(match=>(match.sport||'tennis')===activeSport)}
@@ -19,6 +21,22 @@ async function api(path,options={}){
 }
 async function refreshState(){ db=await api('/api/state'); ratingCache=calculateRatings(); }
 async function mutate(path,body){ const result=await api(path,{method:'POST',body}); await refreshState(); render(); return result; }
+async function autoSyncLichess(){
+  const account=currentUser()?.lichess;
+  if(activeSport!=='chess'||!account||lichessAutoSyncRunning) return;
+  const syncedAt=Number(account.syncedAt)||0;
+  if(Date.now()-syncedAt<LICHESS_AUTO_SYNC_INTERVAL) return;
+  lichessAutoSyncRunning=true;
+  try{
+    await api('/api/lichess/sync',{method:'POST',body:{}});
+    await refreshState();
+    render();
+  }catch(error){
+    console.warn('Не удалось автоматически обновить рейтинг Lichess:',error.message);
+  }finally{
+    lichessAutoSyncRunning=false;
+  }
+}
 function currentUser(){ return db.users.find(user=>user.id===db.currentUserId) || null; }
 function userById(id){ return db.users.find(user=>user.id===id); }
 function displayName(user){ return user ? `${user.firstName} ${user.lastName}` : 'Неизвестный игрок'; }
@@ -64,6 +82,7 @@ function render(){
   const requested=location.pathname.startsWith('/confirm/')?'home':(location.hash||'#home').slice(1);
   showView(requested,false);
   if(location.pathname.startsWith('/confirm/')) setTimeout(()=>handleConfirmationLink(location.pathname.split('/').pop()),0);
+  void autoSyncLichess();
 }
 
 function renderAccount(){
@@ -510,7 +529,7 @@ function openProfile(id){
   const user=userById(id), stats=ratingCache[id], me=currentUser(); if(!user) return;
   const ownAccount=me?.id===id;
   const accountActions=ownAccount?'<div class="profile-account-actions"><button class="button danger wide" data-action="logout">Выйти из аккаунта</button></div>':'';
-  const lichess=lichessProfileHtml(user,ownAccount);
+  const lichess=activeSport==='chess'?lichessProfileHtml(user,ownAccount):'';
   if(!stats){
     if(!ownAccount) return;
     const role=user.role==='admin'?'Администратор':user.role==='teacher'?'Учитель':'Пользователь';
