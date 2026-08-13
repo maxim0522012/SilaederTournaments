@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#f7f8f6">
   <title>Школьный спортивный рейтинг</title>
   <link rel="icon" href="/static/school-logo.jfif">
-  <link rel="stylesheet" href="/styles.css?v=20260812-13">
+  <link rel="stylesheet" href="/styles.css?v=20260813-15">
 </head>
 <body>
   <header class="site-header">
@@ -17,6 +17,7 @@
       </a>
       <div class="sport-switch" role="tablist" aria-label="Вид спорта"><button type="button" role="tab" class="active" aria-selected="true" data-sport="tennis">Теннис</button><button type="button" role="tab" aria-selected="false" data-sport="chess">Шахматы</button></div>
       <nav aria-label="Основная навигация">
+        <a href="#home" data-route="home">Главная</a>
         <a href="#tournaments" data-route="tournaments">Турниры</a>
         <a href="#history" data-route="history" id="history-nav" hidden>История</a>
         <a href="#admin" data-route="admin" id="admin-nav" hidden>Управление</a>
@@ -78,18 +79,12 @@
     </section>
   </main>
 
-  <footer><div class="page"><span>Школьный спортивный рейтинг</span><span>Рейтинг рассчитывается по системе Elo</span></div></footer>
+  <footer><div class="page"><span>Школьный спортивный рейтинг</span><span>Рейтинг рассчитывается по системе Elo</span><button class="admin-login-link" id="admin-login-link" type="button" data-action="open-admin-auth">Вход администратора</button></div></footer>
 
   <dialog id="auth-dialog" class="modal small-modal">
     <button class="modal-close" data-close type="button" aria-label="Закрыть">×</button>
-    <div class="oidc-login">
-      <img src="/static/school-logo.jfif" alt="" class="oidc-logo">
-      <h2>Вход для учеников и учителей</h2>
-      <p>Используйте свою учётную запись ЛК Силаэдра.</p>
-      <a class="button primary wide oidc-button" id="oidc-login-button" href="/auth/silaeder/login">Войти через ЛК Силаэдра</a>
-      <p class="form-message" id="oidc-message"></p>
-    </div>
-    <div class="auth-divider"><span>Резервный вход администратора</span></div>
+    <p class="kicker">СЛУЖЕБНЫЙ ВХОД</p><h2>Вход администратора</h2>
+    <p class="modal-description">Этот способ входа предназначен только для управления сайтом.</p>
     <form id="login-form">
       <label>Логин<input name="login" autocomplete="username" required></label>
       <label>Пароль<input name="password" type="password" autocomplete="current-password" required></label>
@@ -183,6 +178,6 @@
   </dialog>
 
   <div class="toast" id="toast" role="status"></div>
-  <script src="/app.js?v=20260812-18"></script>
+  <script src="/app.js?v=20260813-20"></script>
 </body>
 </html>

@@ -70,10 +70,11 @@ function renderAccount(){
   const me=currentUser();
   document.querySelector('#admin-nav').hidden=me?.role!=='admin';
   document.querySelector('#history-nav').hidden=!me?.isPlayer;
+  document.querySelector('#admin-login-link').hidden=Boolean(me);
   const area=document.querySelector('#account-area');
   area.classList.toggle('guest',!me); document.querySelector('.header-inner').classList.toggle('guest-header',!me);
-  if(!me){ area.innerHTML='<button class="login-button" data-action="open-auth">Войти</button>'; return; }
-  area.innerHTML=`<button class="account-button" data-profile="${me.id}" title="Открыть профиль"><span class="account-avatar">${escapeHtml(initials(me))}</span><span class="account-name">${escapeHtml(me.firstName)}<small>${me.status==='pending'?'Ожидает подтверждения':me.role==='admin'?'Администратор':me.role==='teacher'?'Учитель':escapeHtml(me.className)}</small></span></button><button class="text-action" data-action="logout">Выйти</button>`;
+  if(!me){ area.innerHTML='<a class="login-button" href="/auth/silaeder/login">Войти</a>'; return; }
+  area.innerHTML=`<button class="account-button" data-profile="${me.id}" title="Открыть аккаунт"><span class="account-avatar">${escapeHtml(initials(me))}</span><span class="account-name">${escapeHtml(me.firstName)}<small>${me.status==='pending'?'Ожидает подтверждения':me.role==='admin'?'Администратор':me.role==='teacher'?'Учитель':escapeHtml(me.className)}</small></span></button>`;
 }
 
 function renderHome(){
@@ -390,9 +391,10 @@ function showView(name,updateHash=true){
 }
 
 function openAuth(){
-  const button=document.querySelector('#oidc-login-button'),message=document.querySelector('#oidc-message'),emailField=document.querySelector('#local-email-field');
-  button.classList.toggle('disabled',!db.oidcEnabled); button.setAttribute('aria-disabled',String(!db.oidcEnabled));
-  message.textContent=db.oidcEnabled?'':'Школьный вход будет доступен после настройки OIDC-клиента.';
+  window.location.assign('/auth/silaeder/login');
+}
+function openAdminAuth(){
+  const emailField=document.querySelector('#local-email-field');
   emailField.hidden=!db.localLoginEnabled; emailField.querySelector('input').disabled=!db.localLoginEnabled;
   document.querySelector('#auth-dialog').showModal();
 }
@@ -496,7 +498,15 @@ function openChallenge(id){
   document.querySelector('#challenge-opponent-name').textContent=`${sportLabel(activeSport)} · соперник: ${displayName(opponent)}`;document.querySelector('#challenge-dialog').showModal();
 }
 function openProfile(id){
-  const user=userById(id), stats=ratingCache[id]; if(!user||!stats) return;
+  const user=userById(id), stats=ratingCache[id], me=currentUser(); if(!user) return;
+  const ownAccount=me?.id===id;
+  const accountActions=ownAccount?'<div class="profile-account-actions"><button class="button danger wide" data-action="logout">Выйти из аккаунта</button></div>':'';
+  if(!stats){
+    if(!ownAccount) return;
+    const role=user.role==='admin'?'Администратор':user.role==='teacher'?'Учитель':'Пользователь';
+    document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2><p>${role}</p>${user.email?`<p>Почта ЛК: ${escapeHtml(user.email)}</p>`:''}</div></div>${accountActions}`;
+    document.querySelector('#profile-dialog').showModal();return;
+  }
   const ranking=rankedPlayers(true), place=ranking.findIndex(p=>p.id===id)+1, games=sportMatches().filter(m=>m.active&&(m.playerOne===id||m.playerTwo===id)).sort((a,b)=>b.createdAt-a.createdAt);
   const rate=stats.games?Math.round(stats.wins/stats.games*100):0;
   const email=user.email&&(currentUser()?.id===id||currentUser()?.role==='admin')?`<p>Почта ЛК: ${escapeHtml(user.email)}</p>`:'';
@@ -504,11 +514,11 @@ function openProfile(id){
   const changeIndex=form.findIndex(item=>item!==form[0]),streakLength=form.length?(changeIndex<0?form.length:changeIndex):0;
   const streakWord=form[0]==='draw'?(streakLength===1?'ничья':streakLength<5?'ничьи':'ничьих'):form[0]==='win'?(streakLength===1?'победа':streakLength<5?'победы':'побед'):(streakLength===1?'поражение':streakLength<5?'поражения':'поражений');
   const streakText=streakLength?`${streakLength} ${streakWord} подряд`:'Матчей пока нет';
-  const me=currentUser(),headToHead=me&&me.id!==id?games.filter(match=>match.playerOne===me.id||match.playerTwo===me.id):[],h2hWins=headToHead.filter(match=>profileOutcome(match,id)==='win').length,h2hLosses=headToHead.filter(match=>profileOutcome(match,id)==='loss').length,h2hDraws=headToHead.length-h2hWins-h2hLosses;
+  const headToHead=me&&me.id!==id?games.filter(match=>match.playerOne===me.id||match.playerTwo===me.id):[],h2hWins=headToHead.filter(match=>profileOutcome(match,id)==='win').length,h2hLosses=headToHead.filter(match=>profileOutcome(match,id)==='loss').length,h2hDraws=headToHead.length-h2hWins-h2hLosses;
   const h2h=me&&me.id!==id?`<div class="head-to-head"><div><span>Личные встречи с вами</span><strong>${h2hWins}:${h2hLosses}${activeSport==='chess'?` · ничьи ${h2hDraws}`:''}</strong><small>победы ${escapeHtml(user.firstName)} и ваши</small></div><button class="button primary" data-challenge-player="${id}">Вызвать на матч</button></div>`:'';
   const record=activeSport==='chess'?`${stats.wins}/${stats.draws||0}/${stats.losses}`:`${stats.wins}/${stats.losses}`;
   const recordLabel=activeSport==='chess'?'Победы / ничьи / поражения':'Победы / поражения';
-  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${record}</strong><span>${recordLabel}</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-form-row"><div><span>Последняя форма</span><div class="form-dots">${form.map(item=>`<i class="${item}">${item==='draw'?'Н':item==='win'?'В':'П'}</i>`).join('')||'—'}</div></div><strong>${streakText}</strong></div>${h2h}<div class="profile-chart"><h3>Изменение рейтинга</h3><canvas id="profile-rating-chart" aria-label="График рейтинга игрока"></canvas></div><div class="profile-notification-note">Уведомления по email и в Telegram настраиваются в ЛК Силаэдра.</div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne),own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne,result=activeSport==='chess'?(own===other?'½:½':own>other?'1:0':'0:1'):`${own}:${other}`;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${result}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>`;
+  document.querySelector('#profile-content').innerHTML=`<div class="profile-header"><span class="profile-avatar">${escapeHtml(initials(user))}</span><div><h2>${escapeHtml(visibleName(user))}</h2>${email}${user.status==='inactive'?'<p>Неактивный игрок</p>':''}</div></div><div class="profile-stats"><div class="profile-stat"><strong>${stats.rating}</strong><span>Elo</span></div><div class="profile-stat"><strong>${place||'—'}</strong><span>Место</span></div><div class="profile-stat"><strong>${record}</strong><span>${recordLabel}</span></div><div class="profile-stat"><strong>${rate}%</strong><span>Побед</span></div></div><div class="profile-form-row"><div><span>Последняя форма</span><div class="form-dots">${form.map(item=>`<i class="${item}">${item==='draw'?'Н':item==='win'?'В':'П'}</i>`).join('')||'—'}</div></div><strong>${streakText}</strong></div>${h2h}<div class="profile-chart"><h3>Изменение рейтинга</h3><canvas id="profile-rating-chart" aria-label="График рейтинга игрока"></canvas></div><div class="profile-notification-note">Уведомления по email и в Telegram настраиваются в ЛК Силаэдра.</div><div class="profile-history"><h3>Последние матчи</h3>${games.slice(0,6).map(m=>{const opponent=userById(m.playerOne===id?m.playerTwo:m.playerOne),own=m.playerOne===id?m.scoreOne:m.scoreTwo,other=m.playerOne===id?m.scoreTwo:m.scoreOne,result=activeSport==='chess'?(own===other?'½:½':own>other?'1:0':'0:1'):`${own}:${other}`;return `<div class="profile-game"><span>${formatDate(m.createdAt)} · ${publicName(opponent)}</span><span>${result}</span></div>`}).join('')||'<div class="empty">Матчей пока нет</div>'}</div>${accountActions}`;
   document.querySelector('#profile-dialog').showModal();requestAnimationFrame(()=>drawProfileRatingChart(id));
 }
 
@@ -523,7 +533,8 @@ document.addEventListener('click',async event=>{
   const student=event.target.closest('[data-student]'); if(student){ selectOpponent(student.dataset.student); return; }
   const route=event.target.closest('[data-route]'); if(route){ event.preventDefault(); showView(route.dataset.route); return; }
   if(event.target.closest('[data-action="open-auth"]')) openAuth();
-  if(event.target.closest('[data-action="logout"]')){ try{if(db.oidcSession){const result=await api('/auth/silaeder/logout',{method:'POST',body:{}});location.href=result.redirect}else{await mutate('/api/logout',{});toast('Вы вышли из аккаунта')}}catch(error){toast(error.message)} }
+  if(event.target.closest('[data-action="open-admin-auth"]')) openAdminAuth();
+  if(event.target.closest('[data-action="logout"]')){ const dialog=event.target.closest('dialog');if(dialog?.open)dialog.close();try{if(db.oidcSession){const result=await api('/auth/silaeder/logout',{method:'POST',body:{}});location.href=result.redirect}else{await mutate('/api/logout',{});toast('Вы вышли из аккаунта')}}catch(error){toast(error.message)} }
   if(event.target.closest('[data-action="add-match"]')) openMatchForm();
   const createTournament=event.target.closest('[data-action="create-tournament"]'); if(createTournament){ const form=document.querySelector('#tournament-form'),now=Date.now();form.reset();form.sport.value=activeSport;form.maxPlayers.value=8;form.registrationDeadline.value=localDateTimeValue(now+24*60*60*1000);form.startAt.value=localDateTimeValue(now+48*60*60*1000);form.querySelector('[data-form-message]').textContent='';document.querySelector('#tournament-dialog').showModal(); }
   const openTournament=event.target.closest('[data-open-tournament]'); if(openTournament){ selectedTournamentId=openTournament.dataset.openTournament;renderTournaments();if(openTournament.hasAttribute('data-go-tournaments'))showView('tournaments'); }
@@ -537,7 +548,6 @@ document.addEventListener('click',async event=>{
   const challengeAction=event.target.closest('[data-challenge-action]'); if(challengeAction){try{await mutate(`/api/challenges/${challengeAction.dataset.challengeId}/${challengeAction.dataset.challengeAction}`,{});toast(challengeAction.dataset.challengeAction==='accept'?'Вызов принят':challengeAction.dataset.challengeAction==='reject'?'Вызов отклонён':'Вызов отменён')}catch(error){toast(error.message)}}
   const resultOpponent=event.target.closest('[data-result-opponent]'); if(resultOpponent)openMatchForm(null,resultOpponent.dataset.resultOpponent);
   const close=event.target.closest('[data-close]'); if(close) close.closest('dialog').close();
-  const oidcButton=event.target.closest('#oidc-login-button'); if(oidcButton&&!db.oidcEnabled){event.preventDefault();toast('OIDC-клиент ещё не настроен')}
   const approve=event.target.closest('[data-approve]'); if(approve){ try{await mutate(`/api/admin/users/${approve.dataset.approve}/approve`,{});toast('Регистрация подтверждена')}catch(error){toast(error.message)} }
   const reject=event.target.closest('[data-reject]'); if(reject){ try{await mutate(`/api/admin/users/${reject.dataset.reject}/reject`,{});toast('Заявка отклонена')}catch(error){toast(error.message)} }
   const toggle=event.target.closest('[data-toggle-user]'); if(toggle){ event.preventDefault(); const u=userById(toggle.dataset.toggleUser),action=u.status==='active'?'deactivate':'activate'; toggle.disabled=true; toggle.textContent='Сохраняем…'; try{await mutate(`/api/admin/users/${u.id}/${action}`,{});toast(action==='deactivate'?`${displayName(u)} теперь неактивен`:`${displayName(u)} снова активен`);showView('admin',false)}catch(error){toast(error.message)} return; }
