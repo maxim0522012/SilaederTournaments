@@ -55,6 +55,10 @@ OIDC_LOGOUT_REDIRECT_URI = os.environ.get("CRM_OIDC_POST_LOGOUT_REDIRECT_URI", f
 LICHESS_BASE_URL = os.environ.get("LICHESS_BASE_URL", "https://lichess.org").rstrip("/")
 LICHESS_CLIENT_ID = os.environ.get("LICHESS_CLIENT_ID", "sport.silaeder.ru").strip()
 LICHESS_REDIRECT_URI = os.environ.get("LICHESS_REDIRECT_URI", f"{EXTERNAL_URL}/auth/lichess/callback")
+try:
+    LICHESS_SYNC_INTERVAL_SECONDS = max(60, int(os.environ.get("LICHESS_SYNC_INTERVAL_SECONDS", "900")))
+except ValueError:
+    LICHESS_SYNC_INTERVAL_SECONDS = 900
 app.config.update(
     MAX_CONTENT_LENGTH=32 * 1024,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
@@ -321,8 +325,40 @@ def update_lichess_account(connection, user_id, profile):
              rapid_rating=excluded.rapid_rating,blitz_rating=excluded.blitz_rating,
              classical_rating=excluded.classical_rating,synced_at=excluded.synced_at""",
         (user_id, lichess_id, username, lichess_rating(profile, "rapid"),
-         lichess_rating(profile, "blitz"), lichess_rating(profile, "classical"), timestamp, timestamp),
+        lichess_rating(profile, "blitz"), lichess_rating(profile, "classical"), timestamp, timestamp),
     )
+
+
+def sync_all_lichess_accounts():
+    """Refresh every linked public Lichess profile without storing access tokens."""
+    with db() as connection:
+        accounts = connection.execute(
+            "SELECT user_id,username FROM lichess_accounts ORDER BY connected_at"
+        ).fetchall()
+    updated = failed = 0
+    for account in accounts:
+        try:
+            response = http_requests.get(
+                f"{LICHESS_BASE_URL}/api/user/{quote(account['username'], safe='')}",
+                headers={"Accept": "application/json"}, timeout=10,
+            )
+            if response.status_code != 200:
+                app.logger.warning(
+                    "Background Lichess sync rejected for @%s: HTTP %s",
+                    account["username"], response.status_code,
+                )
+                failed += 1
+                continue
+            with db() as connection:
+                update_lichess_account(connection, account["user_id"], response.json())
+            updated += 1
+        except (http_requests.RequestException, ValueError, KeyError) as error:
+            app.logger.warning(
+                "Background Lichess sync failed for @%s: %s",
+                account["username"], type(error).__name__,
+            )
+            failed += 1
+    return updated, failed
 
 
 def lichess_request_error(response):
@@ -1486,6 +1522,28 @@ def seed_local_demo_command():
     """Create local-only student accounts with a shared development password."""
     seed_local_demo_users()
     print("Создано 12 локальных учеников: student01–student12, пароль 123456")
+
+
+@app.cli.command("lichess-sync-once")
+def lichess_sync_once_command():
+    """Refresh all linked Lichess ratings once."""
+    updated, failed = sync_all_lichess_accounts()
+    print(f"Lichess: обновлено {updated}, ошибок {failed}", flush=True)
+
+
+@app.cli.command("lichess-sync-loop")
+def lichess_sync_loop_command():
+    """Continuously refresh linked Lichess ratings for the background worker."""
+    print(
+        f"Фоновое обновление Lichess запущено; интервал {LICHESS_SYNC_INTERVAL_SECONDS} секунд.",
+        flush=True,
+    )
+    while True:
+        started = time.monotonic()
+        updated, failed = sync_all_lichess_accounts()
+        print(f"Lichess: обновлено {updated}, ошибок {failed}", flush=True)
+        elapsed = time.monotonic() - started
+        time.sleep(max(1, LICHESS_SYNC_INTERVAL_SECONDS - elapsed))
 
 
 if __name__ == "__main__":

@@ -49,6 +49,8 @@ docker compose up -d --build
 
 Для локального запуска с `EXTERNAL_URL=http://localhost:5000` адрес возврата будет `http://localhost:5000/auth/lichess/callback`. На сервере используйте `https://sport.silaeder.ru/auth/lichess/callback`. Пароль и постоянный токен Lichess сайт не хранит — после проверки владельца токен отзывается.
 
+Контейнер `lichess-sync` автоматически обновляет рейтинги всех привязанных профилей, даже когда сайт никто не открывает. Интервал задаётся в `.env` через `LICHESS_SYNC_INTERVAL_SECONDS`; значение по умолчанию — `900` секунд (15 минут), минимальное — 60 секунд. Логи синхронизации можно посмотреть командой `docker compose logs -f lichess-sync`.
+
 Проверить текущую версию миграции:
 
 ```powershell

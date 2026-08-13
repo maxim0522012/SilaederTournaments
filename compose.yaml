@@ -55,6 +55,36 @@ services:
     cap_drop:
       - ALL
 
+  lichess-sync:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: silaeder-lichess-sync
+    restart: unless-stopped
+    init: true
+    depends_on:
+      tennis:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      TENNIS_DB_PATH: /data/tennis.db
+      TZ: Europe/Moscow
+    volumes:
+      - tennis-data-v2:/data
+    command:
+      - flask
+      - --app
+      - app
+      - lichess-sync-loop
+    read_only: true
+    tmpfs:
+      - /tmp:size=16m,noexec,nosuid,nodev
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+
 volumes:
   tennis-data:
   tennis-data-v2:

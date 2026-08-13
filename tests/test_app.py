@@ -16,7 +16,8 @@ os.environ["SEED_DEMO_DATA"] = "false"
 os.environ["ALLOW_LOCAL_USER_LOGIN"] = "true"
 
 from app import (QR_BASE_URL, ROOT, app, calculate_server_ratings, clear_login_failures, db,
-                 seed_database, send_external_notification, update_user_from_oidc)  # noqa: E402
+                 seed_database, send_external_notification, sync_all_lichess_accounts,
+                 update_lichess_account, update_user_from_oidc)  # noqa: E402
 
 with app.app_context():
     upgrade(directory=str(ROOT / "migrations"))
@@ -26,6 +27,7 @@ with app.app_context():
 class ServerFlowTest(unittest.TestCase):
     def setUp(self):
         with db() as connection:
+            connection.execute("DELETE FROM lichess_accounts")
             connection.execute("DELETE FROM oidc_identities")
             connection.execute("DELETE FROM account_link_tokens")
             connection.execute("DELETE FROM match_challenges")
@@ -282,6 +284,28 @@ class ServerFlowTest(unittest.TestCase):
         state = client.get("/api/state").get_json()
         player = next(user for user in state["users"] if user["id"] == "u1")
         self.assertNotIn("lichess", player)
+
+    def test_background_lichess_sync_updates_linked_accounts(self):
+        with db() as connection:
+            update_lichess_account(connection, "u1", {
+                "id": "maximchess", "username": "MaximChess",
+                "perfs": {"rapid": {"rating": 1600}},
+            })
+        refreshed_profile = Mock(status_code=200)
+        refreshed_profile.json.return_value = {
+            "id": "maximchess", "username": "MaximChess",
+            "perfs": {"rapid": {"rating": 1742}, "blitz": {"rating": 1688}},
+        }
+        with patch("app.http_requests.get", return_value=refreshed_profile) as lichess_get:
+            updated, failed = sync_all_lichess_accounts()
+        self.assertEqual((updated, failed), (1, 0))
+        lichess_get.assert_called_once()
+        with db() as connection:
+            account = connection.execute(
+                "SELECT rapid_rating,blitz_rating FROM lichess_accounts WHERE user_id='u1'"
+            ).fetchone()
+        self.assertEqual(account["rapid_rating"], 1742)
+        self.assertEqual(account["blitz_rating"], 1688)
 
     def test_same_players_can_record_multiple_matches_in_one_day(self):
         requester = app.test_client()
