@@ -130,6 +130,21 @@ class OidcSession(schema_db.Model):
     created_at = schema_db.Column(schema_db.Integer, nullable=False)
 
 
+class LichessAccount(schema_db.Model):
+    __tablename__ = "lichess_accounts"
+
+    user_id = schema_db.Column(schema_db.Text, schema_db.ForeignKey("users.id", ondelete="CASCADE"), primary_key=True)
+    lichess_id = schema_db.Column(schema_db.Text, nullable=False)
+    username = schema_db.Column(schema_db.Text, nullable=False)
+    rapid_rating = schema_db.Column(schema_db.Integer)
+    blitz_rating = schema_db.Column(schema_db.Integer)
+    classical_rating = schema_db.Column(schema_db.Integer)
+    connected_at = schema_db.Column(schema_db.Integer, nullable=False)
+    synced_at = schema_db.Column(schema_db.Integer, nullable=False)
+
+    __table_args__ = (Index("idx_lichess_accounts_lichess_id", "lichess_id", unique=True),)
+
+
 class Tournament(schema_db.Model):
     __tablename__ = "tournaments"
 

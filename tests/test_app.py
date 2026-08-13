@@ -1,6 +1,7 @@
 import os
 import tempfile
 import unittest
+from urllib.parse import parse_qs, urlsplit
 from unittest.mock import Mock, patch
 
 from werkzeug.security import generate_password_hash
@@ -227,6 +228,60 @@ class ServerFlowTest(unittest.TestCase):
         })
         self.assertEqual(draw.status_code, 400)
         self.assertIn("побед", draw.get_json()["error"])
+
+    def test_lichess_pkce_link_sync_and_disconnect(self):
+        client = app.test_client()
+        self.assertEqual(self.login(client, "maxim", "maxim-password-123").status_code, 200)
+        started = client.get("/auth/lichess/login")
+        self.assertEqual(started.status_code, 302)
+        authorization = urlsplit(started.location)
+        parameters = parse_qs(authorization.query)
+        self.assertEqual(authorization.netloc, "lichess.org")
+        self.assertEqual(parameters["code_challenge_method"], ["S256"])
+        self.assertEqual(parameters["client_id"], ["sport.silaeder.ru"])
+        self.assertIn("code_challenge", parameters)
+        with client.session_transaction() as oauth_session:
+            flow = dict(oauth_session["lichess_oauth"])
+            self.assertNotIn(flow["verifier"], started.location)
+
+        token_response = Mock(status_code=200)
+        token_response.json.return_value = {"access_token": "test_access_token", "token_type": "bearer"}
+        profile_response = Mock(status_code=200)
+        profile_response.json.return_value = {
+            "id": "maximchess", "username": "MaximChess",
+            "perfs": {"rapid": {"rating": 1720}, "blitz": {"rating": 1655}, "classical": {"rating": 1810}},
+        }
+        revoke_response = Mock(status_code=204)
+        with patch("app.http_requests.post", return_value=token_response) as token_post, \
+                patch("app.http_requests.get", return_value=profile_response), \
+                patch("app.http_requests.delete", return_value=revoke_response) as token_delete:
+            callback = client.get(f"/auth/lichess/callback?code=Valid_Code&state={flow['state']}")
+        self.assertEqual(callback.status_code, 302)
+        self.assertEqual(token_post.call_args.kwargs["json"]["code_verifier"], flow["verifier"])
+        token_delete.assert_called_once()
+        state = client.get("/api/state").get_json()
+        player = next(user for user in state["users"] if user["id"] == "u1")
+        self.assertEqual(player["lichess"]["username"], "MaximChess")
+        self.assertEqual(player["lichess"]["rapid"], 1720)
+        with db() as connection:
+            columns = [row["name"] for row in connection.execute("PRAGMA table_info(lichess_accounts)")]
+            self.assertNotIn("access_token", columns)
+
+        refreshed_profile = Mock(status_code=200)
+        refreshed_profile.json.return_value = {
+            "id": "maximchess", "username": "MaximChess",
+            "perfs": {"rapid": {"rating": 1731}, "blitz": {"rating": 1660}},
+        }
+        with patch("app.http_requests.get", return_value=refreshed_profile):
+            synced = self.post(client, "/api/lichess/sync")
+        self.assertEqual(synced.status_code, 200)
+        state = client.get("/api/state").get_json()
+        player = next(user for user in state["users"] if user["id"] == "u1")
+        self.assertEqual(player["lichess"]["rapid"], 1731)
+        self.assertEqual(self.post(client, "/api/lichess/disconnect").status_code, 200)
+        state = client.get("/api/state").get_json()
+        player = next(user for user in state["users"] if user["id"] == "u1")
+        self.assertNotIn("lichess", player)
 
     def test_same_players_can_record_multiple_matches_in_one_day(self):
         requester = app.test_client()

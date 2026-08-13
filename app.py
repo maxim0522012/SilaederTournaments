@@ -1,3 +1,4 @@
+import base64
 import math
 import hashlib
 import io
@@ -10,7 +11,7 @@ import time
 from datetime import timedelta
 from functools import wraps
 from pathlib import Path
-from urllib.parse import urlencode, urlsplit
+from urllib.parse import quote, urlencode, urlsplit
 
 import qrcode
 import qrcode.image.svg
@@ -51,6 +52,9 @@ OIDC_ENABLED = os.environ.get("CRM_OIDC_ENABLED", "false").lower() == "true" and
 )
 OIDC_REDIRECT_URI = os.environ.get("CRM_OIDC_REDIRECT_URI", f"{EXTERNAL_URL}/auth/silaeder/callback")
 OIDC_LOGOUT_REDIRECT_URI = os.environ.get("CRM_OIDC_POST_LOGOUT_REDIRECT_URI", f"{EXTERNAL_URL}/auth/silaeder/logout/callback")
+LICHESS_BASE_URL = os.environ.get("LICHESS_BASE_URL", "https://lichess.org").rstrip("/")
+LICHESS_CLIENT_ID = os.environ.get("LICHESS_CLIENT_ID", "sport.silaeder.ru").strip()
+LICHESS_REDIRECT_URI = os.environ.get("LICHESS_REDIRECT_URI", f"{EXTERNAL_URL}/auth/lichess/callback")
 app.config.update(
     MAX_CONTENT_LENGTH=32 * 1024,
     PERMANENT_SESSION_LIFETIME=timedelta(hours=12),
@@ -280,6 +284,51 @@ def serialize_user(row, viewer):
                     email=row["email"] if "email" in row.keys() else "",
                     role=row["role"], createdAt=row["created_at"])
     return data
+
+
+def lichess_rating(profile, category):
+    value = (profile.get("perfs") or {}).get(category) or {}
+    rating = value.get("rating")
+    return int(rating) if isinstance(rating, (int, float)) else None
+
+
+def serialize_lichess_account(row):
+    return {
+        "id": row["lichess_id"], "username": row["username"],
+        "rapid": row["rapid_rating"], "blitz": row["blitz_rating"],
+        "classical": row["classical_rating"], "syncedAt": row["synced_at"],
+        "url": f"https://lichess.org/@/{row['username']}",
+    }
+
+
+def update_lichess_account(connection, user_id, profile):
+    lichess_id = str(profile.get("id") or "").strip().lower()
+    username = str(profile.get("username") or "").strip()
+    if not lichess_id or not username or len(lichess_id) > 50 or len(username) > 50:
+        raise ValueError("Lichess не передал корректный профиль.")
+    owner = connection.execute(
+        "SELECT user_id FROM lichess_accounts WHERE lichess_id=?", (lichess_id,)
+    ).fetchone()
+    if owner and owner["user_id"] != user_id:
+        raise ValueError("Этот профиль Lichess уже подключён к другому школьному аккаунту.")
+    timestamp = now_ms()
+    connection.execute(
+        """INSERT INTO lichess_accounts(
+             user_id,lichess_id,username,rapid_rating,blitz_rating,classical_rating,connected_at,synced_at
+           ) VALUES(?,?,?,?,?,?,?,?)
+           ON CONFLICT(user_id) DO UPDATE SET
+             lichess_id=excluded.lichess_id,username=excluded.username,
+             rapid_rating=excluded.rapid_rating,blitz_rating=excluded.blitz_rating,
+             classical_rating=excluded.classical_rating,synced_at=excluded.synced_at""",
+        (user_id, lichess_id, username, lichess_rating(profile, "rapid"),
+         lichess_rating(profile, "blitz"), lichess_rating(profile, "classical"), timestamp, timestamp),
+    )
+
+
+def lichess_request_error(response):
+    if response.status_code == 429:
+        return "Lichess временно ограничил запросы. Попробуйте снова через минуту."
+    return "Lichess временно недоступен. Попробуйте позже."
 
 
 def calculate_server_ratings(connection, sport="tennis"):
@@ -584,6 +633,13 @@ def state():
             """, (viewer_id,)).fetchall()
             match_rows = connection.execute("SELECT * FROM matches WHERE active=1 ORDER BY created_at").fetchall()
         users = [serialize_user(row, viewer) for row in user_rows]
+        lichess_accounts = {
+            row["user_id"]: serialize_lichess_account(row)
+            for row in connection.execute("SELECT * FROM lichess_accounts").fetchall()
+        }
+        for serialized_user in users:
+            if serialized_user["id"] in lichess_accounts:
+                serialized_user["lichess"] = lichess_accounts[serialized_user["id"]]
         matches = [dict(row) for row in match_rows]
         requests_rows = []
         challenge_rows = []
@@ -626,6 +682,7 @@ def state():
                    currentUserId=viewer["id"] if viewer else None,
                    oidcEnabled=OIDC_ENABLED, oidcSession=bool(session.get("oidc_login")),
                    localLoginEnabled=ALLOW_LOCAL_USER_LOGIN,
+                   lichessEnabled=bool(LICHESS_CLIENT_ID),
                    externalNotificationsEnabled=EXTERNAL_NOTIFICATIONS_ENABLED,
                    csrfToken=csrf_token, authMessage=session.pop("auth_message", None))
 
@@ -733,6 +790,121 @@ def send_external_notification(recipient_sub, event_key, title, message, url=Non
             error_message = None
         raise ExternalNotificationError(error_message or "ЛК Силаэдра отклонил уведомление.", response.status_code)
     raise ExternalNotificationError(str(last_error) if last_error else "Не удалось поставить уведомление в очередь.")
+
+
+@app.get("/auth/lichess/login")
+@require_user
+def lichess_login(user):
+    if not LICHESS_CLIENT_ID:
+        session["auth_message"] = "Подключение Lichess не настроено."
+        return redirect("/#home")
+    verifier = secrets.token_urlsafe(48)
+    challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode("ascii")).digest()).decode("ascii").rstrip("=")
+    oauth_state = secrets.token_urlsafe(32)
+    session["lichess_oauth"] = {
+        "user_id": user["id"], "verifier": verifier, "state": oauth_state,
+        "expires_at": now_ms() + 10 * 60 * 1000,
+    }
+    parameters = urlencode({
+        "response_type": "code", "client_id": LICHESS_CLIENT_ID,
+        "redirect_uri": LICHESS_REDIRECT_URI, "scope": "",
+        "code_challenge_method": "S256", "code_challenge": challenge,
+        "state": oauth_state,
+    })
+    return redirect(f"{LICHESS_BASE_URL}/oauth?{parameters}")
+
+
+@app.get("/auth/lichess/callback")
+def lichess_callback():
+    flow = session.pop("lichess_oauth", None)
+    user = current_user()
+    supplied_state = request.args.get("state", "")
+    code = request.args.get("code", "")
+    if request.args.get("error"):
+        session["auth_message"] = "Подключение Lichess отменено."
+        return redirect("/#home")
+    if (not flow or not user or user["id"] != flow.get("user_id") or
+            flow.get("expires_at", 0) < now_ms() or not supplied_state or
+            not secrets.compare_digest(supplied_state, flow.get("state", ""))):
+        session["auth_message"] = "Сессия подключения Lichess устарела. Начните привязку заново."
+        return redirect("/#home")
+    if not code or len(code) > 200 or not all(character.isalnum() or character == "_" for character in code):
+        session["auth_message"] = "Lichess вернул некорректный код авторизации."
+        return redirect("/#home")
+
+    access_token = ""
+    try:
+        token_response = http_requests.post(
+            f"{LICHESS_BASE_URL}/api/token",
+            headers={"Content-Type": "application/json", "Accept": "application/json"},
+            json={
+                "grant_type": "authorization_code", "redirect_uri": LICHESS_REDIRECT_URI,
+                "client_id": LICHESS_CLIENT_ID, "code": code,
+                "code_verifier": flow["verifier"],
+            }, timeout=10,
+        )
+        if token_response.status_code != 200:
+            raise ValueError(lichess_request_error(token_response))
+        access_token = str(token_response.json().get("access_token") or "")
+        if not access_token or len(access_token) > 300:
+            raise ValueError("Lichess не выдал токен для проверки профиля.")
+        profile_response = http_requests.get(
+            f"{LICHESS_BASE_URL}/api/account",
+            headers={"Authorization": f"Bearer {access_token}", "Accept": "application/json"},
+            timeout=10,
+        )
+        if profile_response.status_code != 200:
+            raise ValueError(lichess_request_error(profile_response))
+        profile = profile_response.json()
+        with db() as connection:
+            update_lichess_account(connection, user["id"], profile)
+        session["auth_message"] = f"Профиль Lichess @{profile['username']} успешно подключён."
+    except (http_requests.RequestException, ValueError, KeyError) as error:
+        app.logger.warning("Lichess account link failed: %s", type(error).__name__)
+        session["auth_message"] = str(error) if isinstance(error, ValueError) else "Не удалось подключиться к Lichess. Попробуйте позже."
+    finally:
+        if access_token:
+            try:
+                http_requests.delete(
+                    f"{LICHESS_BASE_URL}/api/token",
+                    headers={"Authorization": f"Bearer {access_token}"}, timeout=5,
+                )
+            except http_requests.RequestException:
+                app.logger.warning("Lichess token revocation failed")
+    return redirect("/#home")
+
+
+@app.post("/api/lichess/sync")
+@require_user
+def sync_lichess_account(user):
+    with db() as connection:
+        account = connection.execute(
+            "SELECT * FROM lichess_accounts WHERE user_id=?", (user["id"],)
+        ).fetchone()
+    if not account:
+        return jsonify(error="Сначала подключите профиль Lichess."), 404
+    try:
+        response = http_requests.get(
+            f"{LICHESS_BASE_URL}/api/user/{quote(account['username'], safe='')}",
+            headers={"Accept": "application/json"}, timeout=10,
+        )
+        if response.status_code != 200:
+            return jsonify(error=lichess_request_error(response)), 503
+        with db() as connection:
+            update_lichess_account(connection, user["id"], response.json())
+    except http_requests.RequestException:
+        return jsonify(error="Не удалось связаться с Lichess."), 503
+    except ValueError as error:
+        return jsonify(error=str(error)), 400
+    return jsonify(ok=True)
+
+
+@app.post("/api/lichess/disconnect")
+@require_user
+def disconnect_lichess_account(user):
+    with db() as connection:
+        connection.execute("DELETE FROM lichess_accounts WHERE user_id=?", (user["id"],))
+    return jsonify(ok=True)
 
 
 @app.get("/auth/silaeder/login")
